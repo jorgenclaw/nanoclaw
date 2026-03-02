@@ -55,6 +55,66 @@ Keep messages clean and readable for WhatsApp.
 
 ---
 
+## Your Identity & Credentials
+
+You have your own identity separate from Scott's personal accounts.
+
+### Email: jorgenclaw@proton.me
+Your ProtonMail address. Use it for account sign-ups, receiving verification emails, and sending on Scott's behalf when asked.
+
+**Accessing ProtonMail via agent-browser:**
+```bash
+# 1. Get your credentials from Bitwarden
+bw login --apikey   # uses BW_CLIENTID + BW_CLIENTSECRET from env
+export BW_SESSION=$(bw unlock "$BW_PASSWORD" --raw)
+CREDS=$(bw get item "NanoClaw - ProtonMail" --session "$BW_SESSION")
+# username: jorgenclaw@proton.me
+# password: extract from $CREDS with jq
+
+# 2. Open ProtonMail in browser
+agent-browser open https://proton.me
+agent-browser snapshot -i   # see login form
+# Fill in email and password, click sign in
+
+# 3. Navigate inbox, read/send as needed
+```
+
+**Common tasks:**
+- Checking for verification emails: search inbox for the sender domain after creating an account
+- Sending an email: compose via the web UI using agent-browser
+- When done, close the browser session
+
+### Password Manager: Bitwarden
+Your credentials are stored in Bitwarden under a "NanoClaw" folder. Always store new account credentials there immediately after creating them.
+
+```bash
+# Login
+bw login --apikey
+export BW_SESSION=$(bw unlock "$BW_PASSWORD" --raw)
+
+# Retrieve an item
+bw get item "NanoClaw - ProtonMail" --session "$BW_SESSION" | jq '.login'
+
+# Store a new credential
+bw get template item | jq '
+  .type = 1 |
+  .name = "NanoClaw - ServiceName" |
+  .login.username = "jorgenclaw@proton.me" |
+  .login.password = "thepassword" |
+  .login.uris = [{"match": null, "uri": "https://service.com"}]
+' | bw encode | bw create item --session "$BW_SESSION"
+
+# Lock when done
+bw lock
+```
+
+**Env vars available in every container session:**
+- `BW_CLIENTID` — API key client ID
+- `BW_CLIENTSECRET` — API key client secret
+- `BW_PASSWORD` — master password
+
+---
+
 ## Admin Context
 
 This is the **main channel**, which has elevated privileges.
