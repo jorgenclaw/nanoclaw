@@ -64,10 +64,22 @@ function log(tag: string, msg: string, data?: Record<string, unknown>): void {
 // Config from environment
 // ---------------------------------------------------------------------------
 
+// Relays for message transport (MLS encrypted group events)
 const DEFAULT_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
   'wss://relay.nostr.band',
+];
+
+// White Noise discovery relays — profiles & relay lists must be published here
+// for White Noise to find us. See whitenoise-rs/src/relay_control/discovery.rs
+const DISCOVERY_RELAYS = [
+  'wss://purplepag.es',
+  'wss://relay.primal.net',
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+  'wss://index.hzrd149.com',
+  'wss://relay.ditto.pub',
 ];
 
 const POLL_INTERVAL_MS = 5000;
@@ -265,7 +277,8 @@ async function main() {
   console.log('');
   console.log(`  Pubkey (hex):    ${pubkey}`);
   console.log(`  Pubkey (bech32): ${npub}`);
-  console.log(`  Relays:          ${relays.join(', ')}`);
+  console.log(`  Transport:       ${relays.join(', ')}`);
+  console.log(`  Discovery:       ${DISCOVERY_RELAYS.join(', ')}`);
   console.log('');
   console.log('  Add the npub above in White Noise, then invite this');
   console.log('  identity to a group. Messages will appear below.');
@@ -301,8 +314,11 @@ async function main() {
     },
   });
 
+  // All relays we want to publish discovery events to (union of transport + discovery)
+  const allRelays = [...new Set([...relays, ...DISCOVERY_RELAYS])];
+
   // --- Publish kind 0 profile metadata (so White Noise can find us in search) ---
-  log('INIT', 'Publishing profile metadata (kind 0)...');
+  log('INIT', `Publishing profile metadata (kind 0) to ${allRelays.length} relays...`);
   try {
     const profileEvent = signer.signEvent({
       kind: 0,
@@ -314,10 +330,25 @@ async function main() {
         picture: '',
       }),
     } as any);
-    await network.publish(relays, profileEvent);
+    await network.publish(allRelays, profileEvent);
     log('INIT', 'Profile metadata published (kind 0)');
   } catch (err: any) {
     log('ERROR', 'Failed to publish profile', { error: err?.message });
+  }
+
+  // --- Publish kind 10002 NIP-65 relay list (White Noise checks this FIRST for user discovery) ---
+  log('INIT', 'Publishing NIP-65 relay list (kind 10002)...');
+  try {
+    const nip65Event = signer.signEvent({
+      kind: 10002,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: relays.map((r) => ['r', r]),
+      content: '',
+    } as any);
+    await network.publish(allRelays, nip65Event);
+    log('INIT', `NIP-65 relay list published (kind 10002) with ${relays.length} relays`);
+  } catch (err: any) {
+    log('ERROR', 'Failed to publish NIP-65 relay list', { error: err?.message });
   }
 
   // --- Publish kind 10051 KeyPackage Relay List (tells White Noise WHERE to find our KeyPackages) ---
@@ -325,11 +356,11 @@ async function main() {
   try {
     const relayListUnsigned = createKeyPackageRelayListEvent({
       pubkey,
-      relays,
+      relays: allRelays,
       client: 'NanoClaw/marmot-test',
     });
     const relayListEvent = signer.signEvent(relayListUnsigned);
-    await network.publish(relays, relayListEvent);
+    await network.publish(allRelays, relayListEvent);
     log('INIT', `KeyPackage relay list published (kind ${KEY_PACKAGE_RELAY_LIST_KIND}) with ${relays.length} relays`);
   } catch (err: any) {
     log('ERROR', 'Failed to publish relay list', { error: err?.message });
@@ -339,7 +370,7 @@ async function main() {
   log('INIT', 'Publishing KeyPackage (kind 443)...');
   try {
     await marmotClient.keyPackages.create({
-      relays,
+      relays: allRelays,
       client: 'NanoClaw/marmot-test',
       isLastResort: true,
     });
