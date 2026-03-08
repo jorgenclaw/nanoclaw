@@ -450,15 +450,39 @@ async function main() {
   let lastJoinedGroupId: string | null = null;
   const subscriptions = new Map<string, { close: () => void }>();
 
+  // --- Per-group ingest queue to prevent concurrent ingest() calls ---
+  // Two concurrent ingest() calls on the same MarmotGroup can corrupt state:
+  // between await points, one call can advance the epoch while the other
+  // still holds a stale state reference. Serializing prevents this.
+  const ingestQueues = new Map<string, Promise<void>>();
+
+  function enqueueIngest(mlsGroupIdHex: string, fn: () => Promise<void>): void {
+    const prev = ingestQueues.get(mlsGroupIdHex) ?? Promise.resolve();
+    const next = prev.then(fn, fn); // Run fn even if previous rejected
+    ingestQueues.set(mlsGroupIdHex, next);
+  }
+
   /**
    * Subscribe to kind 445 events for a group and print decrypted messages.
    *
    * IMPORTANT: nostrGroupIdHex is the Marmot "nostrGroupId" from MarmotGroupData
    * (used in `#h` tags on kind 445 events). This is DIFFERENT from the MLS
    * internal group ID (group.idStr / groupContext.groupId).
+   *
+   * @param sinceTimestamp - Unix timestamp to start the subscription from.
+   *   For real-time joins, use now - 5min. For historical welcome replays,
+   *   use the welcome's created_at to avoid missing messages.
    */
-  async function subscribeToGroup(mlsGroupIdHex: string, nostrGroupIdHex: string, groupName: string): Promise<void> {
+  async function subscribeToGroup(
+    mlsGroupIdHex: string,
+    nostrGroupIdHex: string,
+    groupName: string,
+    sinceTimestamp?: number,
+  ): Promise<void> {
     if (subscriptions.has(nostrGroupIdHex)) return;
+
+    // Default: look back 5 minutes from now
+    const since = sinceTimestamp ?? Math.floor(Date.now() / 1000) - 300;
 
     // Get the group's configured relays (set by the group creator — White Noise)
     let groupRelays: string[] = [];
@@ -475,6 +499,7 @@ async function main() {
     log('GROUP', `Subscribing to group ${groupName} on ${subscribeRelays.length} relays`, {
       mlsGroupId: mlsGroupIdHex.slice(0, 24) + '...',
       nostrGroupId: nostrGroupIdHex.slice(0, 24) + '...',
+      since: new Date(since * 1000).toISOString(),
       subscribeRelays,
     });
 
@@ -483,73 +508,79 @@ async function main() {
       {
         kinds: [GROUP_EVENT_KIND],
         '#h': [nostrGroupIdHex],  // MUST use nostrGroupId, NOT MLS group ID!
-        since: Math.floor(Date.now() / 1000) - 300, // Look back 5 minutes
+        since,
       },
       {
         onevent: async (event: any) => {
           log('DEBUG', `Received kind ${event.kind} event for group`, {
             eventId: event.id?.slice(0, 16),
             from: event.pubkey?.slice(0, 12),
-            isOwnEvent: event.pubkey === pubkey,
           });
 
-          // Skip our own events
-          if (event.pubkey === pubkey) return;
+          // NOTE: We do NOT filter by event.pubkey here because kind 445 events
+          // are signed with EPHEMERAL keypairs (not the sender's identity).
+          // Self-echo filtering is handled inside MarmotGroup.ingest() via
+          // the #sentEventIds set.
 
-          try {
-            const group = await marmotClient.getGroup(mlsGroupIdHex);
+          // Serialize ingest calls to prevent concurrent state corruption
+          enqueueIngest(mlsGroupIdHex, async () => {
+            try {
+              const group = await marmotClient.getGroup(mlsGroupIdHex);
 
-            for await (const result of group.ingest([event])) {
-              if (
-                result.kind === 'processed' &&
-                result.result.kind === 'applicationMessage'
-              ) {
-                try {
-                  const rumor = deserializeApplicationRumor(
-                    result.result.message,
-                  );
+              for await (const result of group.ingest([event])) {
+                if (
+                  result.kind === 'processed' &&
+                  result.result.kind === 'applicationMessage'
+                ) {
+                  try {
+                    const rumor = deserializeApplicationRumor(
+                      result.result.message,
+                    );
 
-                  const senderPubkey = rumor.pubkey || event.pubkey || 'unknown';
-                  const senderShort = senderPubkey.slice(0, 12) + '...';
-                  const content = rumor.content || '';
-                  const timestamp = rumor.created_at
-                    ? new Date(rumor.created_at * 1000).toISOString()
-                    : new Date().toISOString();
+                    const senderPubkey = rumor.pubkey || 'unknown';
+                    const senderShort = senderPubkey.slice(0, 12) + '...';
+                    const content = rumor.content || '';
+                    const timestamp = rumor.created_at
+                      ? new Date(rumor.created_at * 1000).toISOString()
+                      : new Date().toISOString();
 
-                  console.log('');
-                  log('MSG', `[${groupName}] <${senderShort}> ${content}`, {
-                    timestamp,
+                    console.log('');
+                    log('MSG', `[${groupName}] <${senderShort}> ${content}`, {
+                      timestamp,
+                      eventId: event.id?.slice(0, 16),
+                    });
+                    console.log('');
+                  } catch (deserializeErr: any) {
+                    log('WARN', 'Failed to deserialize application rumor', {
+                      error: deserializeErr?.message,
+                    });
+                  }
+                } else if (result.kind === 'processed') {
+                  log('DEBUG', `Processed MLS message type: ${result.result.kind}`, {
                     eventId: event.id?.slice(0, 16),
                   });
-                  console.log('');
-                } catch (deserializeErr: any) {
-                  log('WARN', 'Failed to deserialize application rumor', {
-                    error: deserializeErr?.message,
+                } else if (result.kind === 'unreadable') {
+                  log('DEBUG', 'Unreadable event (may be commit/proposal)', {
+                    eventId: event.id?.slice(0, 16),
+                  });
+                } else if (result.kind === 'skipped') {
+                  log('DEBUG', `Skipped event: ${(result as any).reason}`, {
+                    eventId: event.id?.slice(0, 16),
                   });
                 }
-              } else if (result.kind === 'processed') {
-                log('DEBUG', `Processed MLS message type: ${result.result.kind}`, {
-                  eventId: event.id?.slice(0, 16),
-                });
-              } else if (result.kind === 'unreadable') {
-                log('DEBUG', 'Unreadable event (may be commit/proposal)', {
-                  eventId: event.id?.slice(0, 16),
-                });
-              } else if (result.kind === 'skipped') {
-                log('DEBUG', `Skipped event: ${result.reason}`, {
-                  eventId: event.id?.slice(0, 16),
-                });
               }
-            }
 
-            // Save group state after processing
-            await group.save();
-          } catch (err: any) {
-            log('ERROR', 'Failed to process group event', {
-              eventId: event.id?.slice(0, 16),
-              error: err?.message,
-            });
-          }
+              // Save group state after processing (redundant with ingest's
+              // internal save, but ensures state is persisted if ingest
+              // advanced the epoch mid-generator before yielding all results)
+              await group.save();
+            } catch (err: any) {
+              log('ERROR', 'Failed to process group event', {
+                eventId: event.id?.slice(0, 16),
+                error: err?.message,
+              });
+            }
+          });
         },
       },
     );
@@ -585,9 +616,18 @@ async function main() {
     console.log('');
 
     lastJoinedGroupId = mlsGroupIdHex;
-    subscribeToGroup(mlsGroupIdHex, nostrGroupIdHex, groupName);
+
+    // Subscribe with a generous lookback — the Welcome may have been sent
+    // well before we process it (especially on restart from persistent state).
+    // Look back 1 hour to catch any messages sent shortly after group creation.
+    const lookbackSince = Math.floor(Date.now() / 1000) - 3600;
+    subscribeToGroup(mlsGroupIdHex, nostrGroupIdHex, groupName, lookbackSince).catch((err: any) => {
+      log('ERROR', 'Failed to subscribe to group', { error: err?.message });
+    });
 
     // Perform self-update for forward secrecy (MIP-02)
+    // Enqueue after subscription setup so the self-update commit doesn't
+    // race with initial message processing.
     group.selfUpdate().catch((err: any) => {
       log('WARN', 'Failed self-update after join', { error: err?.message });
     });
