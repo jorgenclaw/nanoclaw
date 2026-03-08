@@ -451,18 +451,20 @@ async function main() {
 
   /**
    * Subscribe to kind 445 events for a group and print decrypted messages.
+   *
+   * IMPORTANT: nostrGroupIdHex is the Marmot "nostrGroupId" from MarmotGroupData
+   * (used in `#h` tags on kind 445 events). This is DIFFERENT from the MLS
+   * internal group ID (group.idStr / groupContext.groupId).
    */
-  async function subscribeToGroup(groupIdHex: string, groupName: string): Promise<void> {
-    if (subscriptions.has(groupIdHex)) return;
+  async function subscribeToGroup(mlsGroupIdHex: string, nostrGroupIdHex: string, groupName: string): Promise<void> {
+    if (subscriptions.has(nostrGroupIdHex)) return;
 
     // Get the group's configured relays (set by the group creator — White Noise)
     let groupRelays: string[] = [];
     try {
-      const group = await marmotClient.getGroup(groupIdHex);
+      const group = await marmotClient.getGroup(mlsGroupIdHex);
       groupRelays = group.relays || [];
-      log('GROUP', `Group relays from MLS config: ${groupRelays.join(', ') || 'none'}`, {
-        groupData: group.groupData ? JSON.stringify(group.groupData).slice(0, 200) : 'null',
-      });
+      log('GROUP', `Group relays from MLS config: ${groupRelays.join(', ') || 'none'}`);
     } catch (err: any) {
       log('WARN', `Could not get group relays`, { error: err?.message });
     }
@@ -470,7 +472,8 @@ async function main() {
     // Subscribe to ALL relays: our relays + the group's relays
     const subscribeRelays = [...new Set([...allRelays, ...groupRelays])];
     log('GROUP', `Subscribing to group ${groupName} on ${subscribeRelays.length} relays`, {
-      groupIdHex: groupIdHex.slice(0, 24) + '...',
+      mlsGroupId: mlsGroupIdHex.slice(0, 24) + '...',
+      nostrGroupId: nostrGroupIdHex.slice(0, 24) + '...',
       subscribeRelays,
     });
 
@@ -478,7 +481,7 @@ async function main() {
       subscribeRelays,
       {
         kinds: [GROUP_EVENT_KIND],
-        '#h': [groupIdHex],
+        '#h': [nostrGroupIdHex],  // MUST use nostrGroupId, NOT MLS group ID!
         since: Math.floor(Date.now() / 1000) - 300, // Look back 5 minutes
       },
       {
@@ -493,7 +496,7 @@ async function main() {
           if (event.pubkey === pubkey) return;
 
           try {
-            const group = await marmotClient.getGroup(groupIdHex);
+            const group = await marmotClient.getGroup(mlsGroupIdHex);
 
             for await (const result of group.ingest([event])) {
               if (
@@ -550,25 +553,46 @@ async function main() {
       },
     );
 
-    subscriptions.set(groupIdHex, sub);
+    subscriptions.set(nostrGroupIdHex, sub);
     log('GROUP', `Subscribed to kind ${GROUP_EVENT_KIND} events for group`, {
-      groupIdHex: groupIdHex.slice(0, 24) + '...',
+      nostrGroupId: nostrGroupIdHex.slice(0, 24) + '...',
     });
   }
 
   // --- Listen for new groups joined via welcome ---
   marmotClient.on('groupJoined', (group) => {
-    const groupIdHex = group.idStr;
-    const groupName = group.groupData?.name || `marmot:${groupIdHex.slice(0, 12)}`;
+    const mlsGroupIdHex = group.idStr;
+    const groupName = group.groupData?.name || `marmot:${mlsGroupIdHex.slice(0, 12)}`;
+
+    // Extract the nostrGroupId (used in #h tags on kind 445 events)
+    // This is DIFFERENT from the MLS internal group ID (group.idStr)
+    let nostrGroupIdHex: string;
+    try {
+      const groupData = group.groupData;
+      if (groupData?.nostrGroupId) {
+        nostrGroupIdHex = bytesToHex(new Uint8Array(
+          groupData.nostrGroupId instanceof Uint8Array
+            ? groupData.nostrGroupId
+            : Object.values(groupData.nostrGroupId) as number[]
+        ));
+      } else {
+        log('WARN', 'No nostrGroupId in groupData, falling back to MLS group ID');
+        nostrGroupIdHex = mlsGroupIdHex;
+      }
+    } catch (err: any) {
+      log('WARN', `Failed to extract nostrGroupId: ${err?.message}, falling back to MLS group ID`);
+      nostrGroupIdHex = mlsGroupIdHex;
+    }
 
     console.log('');
     log('JOIN', `🎉 Joined new Marmot group: ${groupName}`, {
-      groupIdHex: groupIdHex.slice(0, 24) + '...',
+      mlsGroupId: mlsGroupIdHex.slice(0, 24) + '...',
+      nostrGroupId: nostrGroupIdHex.slice(0, 24) + '...',
     });
     console.log('');
 
-    lastJoinedGroupId = groupIdHex;
-    subscribeToGroup(groupIdHex, groupName);
+    lastJoinedGroupId = mlsGroupIdHex;
+    subscribeToGroup(mlsGroupIdHex, nostrGroupIdHex, groupName);
 
     // Perform self-update for forward secrecy (MIP-02)
     group.selfUpdate().catch((err: any) => {
