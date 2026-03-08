@@ -16,7 +16,7 @@
  *
  * Once running:
  *   1. Copy the npub (bech32) shown at startup
- *   2. In White Noise, add this npub as a contact and invite it to a group
+ *   2. In White Noise, add this npub as a contact and send a message
  *   3. The script will print incoming messages as they arrive
  *   4. Type a message on stdin + Enter to send it to the most recently joined group
  *   5. Press Ctrl+C to quit
@@ -82,7 +82,7 @@ const DISCOVERY_RELAYS = [
   'wss://relay.ditto.pub',
 ];
 
-const POLL_INTERVAL_MS = 5000;
+const POLL_INTERVAL_MS = 3000; // Poll every 3 seconds (was 5)
 
 let privateKeyHex = process.env.MARMOT_NOSTR_PRIVATE_KEY?.trim() || '';
 if (!privateKeyHex) {
@@ -290,7 +290,9 @@ async function main() {
   console.log('');
 
   // --- Nostr network adapter ---
-  const network = new TestNetworkAdapter(relays);
+  // Use ALL relays for the adapter so gift wraps can be received on any relay
+  const allRelays = [...new Set([...relays, ...DISCOVERY_RELAYS])];
+  const network = new TestNetworkAdapter(allRelays);
 
   // --- Storage (in-memory, ephemeral) ---
   const groupStateBackend = new KeyValueGroupStateBackend(new InMemoryKVStore());
@@ -314,9 +316,6 @@ async function main() {
     },
   });
 
-  // All relays we want to publish discovery events to (union of transport + discovery)
-  const allRelays = [...new Set([...relays, ...DISCOVERY_RELAYS])];
-
   // --- Publish kind 0 profile metadata (so White Noise can find us in search) ---
   log('INIT', `Publishing profile metadata (kind 0) to ${allRelays.length} relays...`);
   try {
@@ -336,19 +335,36 @@ async function main() {
     log('ERROR', 'Failed to publish profile', { error: err?.message });
   }
 
-  // --- Publish kind 10002 NIP-65 relay list (White Noise checks this FIRST for user discovery) ---
+  // --- Publish kind 10002 NIP-65 relay list (White Noise uses for user discovery AND gift wrap fallback) ---
   log('INIT', 'Publishing NIP-65 relay list (kind 10002)...');
   try {
     const nip65Event = signer.signEvent({
       kind: 10002,
       created_at: Math.floor(Date.now() / 1000),
-      tags: relays.map((r) => ['r', r]),
+      tags: allRelays.map((r) => ['r', r]),
       content: '',
     } as any);
     await network.publish(allRelays, nip65Event);
-    log('INIT', `NIP-65 relay list published (kind 10002) with ${relays.length} relays`);
+    log('INIT', `NIP-65 relay list published (kind 10002) with ${allRelays.length} relays`);
   } catch (err: any) {
     log('ERROR', 'Failed to publish NIP-65 relay list', { error: err?.message });
+  }
+
+  // --- Publish kind 10050 NIP-17 Inbox Relay List (White Noise sends gift wraps HERE first!) ---
+  // This is the PRIMARY relay list White Noise checks for delivering
+  // welcome messages (kind 1059 gift wraps). Without this, it falls back to NIP-65.
+  log('INIT', 'Publishing NIP-17 Inbox relay list (kind 10050)...');
+  try {
+    const inboxRelayEvent = signer.signEvent({
+      kind: 10050,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: relays.map((r) => ['relay', r]),
+      content: '',
+    } as any);
+    await network.publish(allRelays, inboxRelayEvent);
+    log('INIT', `Inbox relay list published (kind 10050) with ${relays.length} relays`);
+  } catch (err: any) {
+    log('ERROR', 'Failed to publish inbox relay list', { error: err?.message });
   }
 
   // --- Publish kind 10051 KeyPackage Relay List (tells White Noise WHERE to find our KeyPackages) ---
@@ -361,7 +377,7 @@ async function main() {
     });
     const relayListEvent = signer.signEvent(relayListUnsigned);
     await network.publish(allRelays, relayListEvent);
-    log('INIT', `KeyPackage relay list published (kind ${KEY_PACKAGE_RELAY_LIST_KIND}) with ${relays.length} relays`);
+    log('INIT', `KeyPackage relay list published (kind ${KEY_PACKAGE_RELAY_LIST_KIND}) with ${allRelays.length} relays`);
   } catch (err: any) {
     log('ERROR', 'Failed to publish relay list', { error: err?.message });
   }
@@ -399,14 +415,20 @@ async function main() {
     log('GROUP', `Subscribing to group ${groupName}`, { groupIdHex: groupIdHex.slice(0, 24) + '...' });
 
     const sub = network.subscribeNative(
-      relays,
+      allRelays,
       {
         kinds: [GROUP_EVENT_KIND],
         '#h': [groupIdHex],
-        since: Math.floor(Date.now() / 1000),
+        since: Math.floor(Date.now() / 1000) - 60, // Look back 60 seconds
       },
       {
         onevent: async (event: any) => {
+          log('DEBUG', `Received kind ${event.kind} event for group`, {
+            eventId: event.id?.slice(0, 16),
+            from: event.pubkey?.slice(0, 12),
+            isOwnEvent: event.pubkey === pubkey,
+          });
+
           // Skip our own events
           if (event.pubkey === pubkey) return;
 
@@ -441,6 +463,10 @@ async function main() {
                     error: deserializeErr?.message,
                   });
                 }
+              } else if (result.kind === 'processed') {
+                log('DEBUG', `Processed MLS message type: ${result.result.kind}`, {
+                  eventId: event.id?.slice(0, 16),
+                });
               } else if (result.kind === 'unreadable') {
                 log('DEBUG', 'Unreadable event (may be commit/proposal)', {
                   eventId: event.id?.slice(0, 16),
@@ -476,7 +502,7 @@ async function main() {
     const groupName = group.groupData?.name || `marmot:${groupIdHex.slice(0, 12)}`;
 
     console.log('');
-    log('JOIN', `Joined new Marmot group: ${groupName}`, {
+    log('JOIN', `🎉 Joined new Marmot group: ${groupName}`, {
       groupIdHex: groupIdHex.slice(0, 24) + '...',
     });
     console.log('');
@@ -490,43 +516,135 @@ async function main() {
     });
   });
 
-  // --- Welcome poller (kind 1059 gift wraps) ---
-  let lastCheck = Math.floor(Date.now() / 1000);
+  // --- Real-time subscription for gift wraps (kind 1059) ---
+  // This catches events in real-time as they arrive, no polling delay.
+  log('INIT', `Setting up real-time gift wrap subscription on ${allRelays.length} relays...`);
+  const seenGiftWrapIds = new Set<string>();
+
+  const giftWrapSub = network.subscribeNative(
+    allRelays,
+    {
+      kinds: [1059],
+      '#p': [pubkey],
+      since: Math.floor(Date.now() / 1000) - 300, // Look back 5 minutes
+    },
+    {
+      onevent: async (event: any) => {
+        if (seenGiftWrapIds.has(event.id)) return;
+        seenGiftWrapIds.add(event.id);
+
+        log('GIFTWRAP', `Received gift wrap event`, {
+          eventId: event.id?.slice(0, 16),
+          kind: event.kind,
+          from: event.pubkey?.slice(0, 12),
+          created_at: new Date((event.created_at || 0) * 1000).toISOString(),
+          tagCount: event.tags?.length,
+        });
+
+        try {
+          const newCount = await inviteReader.ingestEvents([event]);
+          log('GIFTWRAP', `Ingested: ${newCount} new gift wrap(s)`);
+
+          if (newCount > 0) {
+            const invites = await inviteReader.decryptGiftWraps();
+            log('GIFTWRAP', `Decrypted ${invites.length} invite(s)`);
+
+            for (const invite of invites) {
+              log('GIFTWRAP', `Processing invite`, {
+                inviteId: invite.id?.slice(0, 16),
+                kind: (invite as any).kind,
+                tags: (invite as any).tags?.slice(0, 3),
+              });
+
+              try {
+                const { group } = await marmotClient.joinGroupFromWelcome({
+                  welcomeRumor: invite,
+                });
+
+                log('GIFTWRAP', `✅ Joined group from welcome!`, {
+                  groupId: group.idStr.slice(0, 24) + '...',
+                });
+
+                await inviteReader.markAsRead(invite.id);
+              } catch (joinErr: any) {
+                log('ERROR', 'Failed to join from welcome', {
+                  error: joinErr?.message,
+                  stack: joinErr?.stack?.split('\n').slice(0, 3).join(' | '),
+                });
+              }
+            }
+          }
+        } catch (err: any) {
+          log('ERROR', 'Failed to process gift wrap', {
+            error: err?.message,
+          });
+        }
+      },
+      oneose: () => {
+        log('GIFTWRAP', 'End of stored gift wraps, now listening in real-time');
+      },
+    },
+  );
+
+  log('INIT', `Real-time gift wrap subscription active on ${allRelays.length} relays`);
+
+  // --- Fallback polling for gift wraps (catches anything the subscription might miss) ---
+  let lastCheck = Math.floor(Date.now() / 1000) - 300; // Start from 5 min ago
+  let pollCount = 0;
 
   const pollTimer = setInterval(async () => {
+    pollCount++;
     try {
-      const events = await network.request(relays, {
+      // Query ALL relays (transport + discovery)
+      const events = await network.request(allRelays, {
         kinds: [1059],
         '#p': [pubkey],
         since: lastCheck,
       });
 
+      // Log every 10th poll or when events found
+      if (events.length > 0 || pollCount % 10 === 0) {
+        log('POLL', `Poll #${pollCount}: ${events.length} gift wrap(s) found`, {
+          since: new Date(lastCheck * 1000).toISOString(),
+          relayCount: allRelays.length,
+        });
+      }
+
       if (events.length > 0) {
-        log('WELCOME', `Received ${events.length} potential welcome event(s)`);
+        // Filter out already-seen events
+        const newEvents = events.filter((e: any) => {
+          if (seenGiftWrapIds.has(e.id)) return false;
+          seenGiftWrapIds.add(e.id);
+          return true;
+        });
 
-        const newCount = await inviteReader.ingestEvents(events);
+        if (newEvents.length > 0) {
+          log('POLL', `${newEvents.length} NEW gift wrap(s) to process`);
 
-        if (newCount > 0) {
-          log('WELCOME', `${newCount} new gift wrap(s) ingested, decrypting...`);
+          const newCount = await inviteReader.ingestEvents(newEvents);
 
-          const invites = await inviteReader.decryptGiftWraps();
-          log('WELCOME', `Decrypted ${invites.length} invite(s)`);
+          if (newCount > 0) {
+            log('POLL', `${newCount} new gift wrap(s) ingested, decrypting...`);
 
-          for (const invite of invites) {
-            try {
-              const { group } = await marmotClient.joinGroupFromWelcome({
-                welcomeRumor: invite,
-              });
+            const invites = await inviteReader.decryptGiftWraps();
+            log('POLL', `Decrypted ${invites.length} invite(s)`);
 
-              log('WELCOME', `Joined group from welcome`, {
-                groupId: group.idStr.slice(0, 24) + '...',
-              });
+            for (const invite of invites) {
+              try {
+                const { group } = await marmotClient.joinGroupFromWelcome({
+                  welcomeRumor: invite,
+                });
 
-              await inviteReader.markAsRead(invite.id);
-            } catch (joinErr: any) {
-              log('ERROR', 'Failed to join from welcome', {
-                error: joinErr?.message,
-              });
+                log('POLL', `✅ Joined group from welcome`, {
+                  groupId: group.idStr.slice(0, 24) + '...',
+                });
+
+                await inviteReader.markAsRead(invite.id);
+              } catch (joinErr: any) {
+                log('ERROR', 'Failed to join from welcome (poll)', {
+                  error: joinErr?.message,
+                });
+              }
             }
           }
         }
@@ -538,7 +656,35 @@ async function main() {
     }
   }, POLL_INTERVAL_MS);
 
-  log('POLL', `Welcome poller started (every ${POLL_INTERVAL_MS}ms)`);
+  log('POLL', `Fallback poller started (every ${POLL_INTERVAL_MS}ms on ${allRelays.length} relays)`);
+
+  // --- Also do a broad diagnostic check for ANY kind 1059 events targeting us ---
+  setTimeout(async () => {
+    try {
+      log('DIAG', 'Running diagnostic: checking for ANY gift wraps on all relays (no time filter)...');
+      const allGiftWraps = await network.request(allRelays, {
+        kinds: [1059],
+        '#p': [pubkey],
+        limit: 20,
+      });
+      log('DIAG', `Found ${allGiftWraps.length} total gift wrap(s) for our pubkey (all time)`, {
+        eventIds: allGiftWraps.map((e: any) => e.id?.slice(0, 12)).join(', '),
+      });
+      if (allGiftWraps.length > 0) {
+        for (const gw of allGiftWraps) {
+          log('DIAG', `  Gift wrap detail`, {
+            id: gw.id?.slice(0, 16),
+            created_at: new Date((gw.created_at || 0) * 1000).toISOString(),
+            pubkey: gw.pubkey?.slice(0, 12),
+            tags: gw.tags?.map((t: any[]) => t[0]).join(','),
+            contentLen: gw.content?.length,
+          });
+        }
+      }
+    } catch (err: any) {
+      log('DIAG', 'Diagnostic check failed', { error: err?.message });
+    }
+  }, 8000); // Run 8 seconds after boot
 
   // --- Stdin reader for sending messages ---
   const rl = readline.createInterface({
@@ -573,6 +719,8 @@ async function main() {
     log('SHUTDOWN', 'Cleaning up...');
 
     clearInterval(pollTimer);
+
+    giftWrapSub.close();
 
     for (const [, sub] of subscriptions) {
       sub.close();
