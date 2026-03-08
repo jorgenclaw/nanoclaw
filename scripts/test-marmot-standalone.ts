@@ -135,7 +135,8 @@ class FileBackedKVStore<T = any> {
       for (const [k, v] of this.store) {
         obj[k] = v;
       }
-      fs.writeFileSync(this.filePath, JSON.stringify(obj, null, 2), 'utf-8');
+      fs.writeFileSync(this.filePath, JSON.stringify(obj, (_key, value) =>
+        typeof value === 'bigint' ? value.toString() : value, 2), 'utf-8');
     } catch (err: any) {
       log('WARN', `Failed to save store ${this.filePath}`, { error: err?.message });
     }
