@@ -452,17 +452,34 @@ async function main() {
   /**
    * Subscribe to kind 445 events for a group and print decrypted messages.
    */
-  function subscribeToGroup(groupIdHex: string, groupName: string): void {
+  async function subscribeToGroup(groupIdHex: string, groupName: string): Promise<void> {
     if (subscriptions.has(groupIdHex)) return;
 
-    log('GROUP', `Subscribing to group ${groupName}`, { groupIdHex: groupIdHex.slice(0, 24) + '...' });
+    // Get the group's configured relays (set by the group creator — White Noise)
+    let groupRelays: string[] = [];
+    try {
+      const group = await marmotClient.getGroup(groupIdHex);
+      groupRelays = group.relays || [];
+      log('GROUP', `Group relays from MLS config: ${groupRelays.join(', ') || 'none'}`, {
+        groupData: group.groupData ? JSON.stringify(group.groupData).slice(0, 200) : 'null',
+      });
+    } catch (err: any) {
+      log('WARN', `Could not get group relays`, { error: err?.message });
+    }
+
+    // Subscribe to ALL relays: our relays + the group's relays
+    const subscribeRelays = [...new Set([...allRelays, ...groupRelays])];
+    log('GROUP', `Subscribing to group ${groupName} on ${subscribeRelays.length} relays`, {
+      groupIdHex: groupIdHex.slice(0, 24) + '...',
+      subscribeRelays,
+    });
 
     const sub = network.subscribeNative(
-      allRelays,
+      subscribeRelays,
       {
         kinds: [GROUP_EVENT_KIND],
         '#h': [groupIdHex],
-        since: Math.floor(Date.now() / 1000) - 60, // Look back 60 seconds
+        since: Math.floor(Date.now() / 1000) - 300, // Look back 5 minutes
       },
       {
         onevent: async (event: any) => {
