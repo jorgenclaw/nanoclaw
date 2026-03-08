@@ -23,6 +23,8 @@
  */
 
 import * as readline from 'node:readline';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 import { getPublicKey, generateSecretKey, finalizeEvent, type UnsignedEvent } from 'nostr-tools';
 import { SimplePool, type SubCloser } from 'nostr-tools/pool';
@@ -97,24 +99,63 @@ const relays: string[] = process.env.MARMOT_NOSTR_RELAYS
   : DEFAULT_RELAYS;
 
 // ---------------------------------------------------------------------------
-// In-memory KeyValueStoreBackend (same as marmot.ts)
+// File-backed KeyValueStore (survives restarts!)
 // ---------------------------------------------------------------------------
 
-class InMemoryKVStore<T = any> {
+// State directory — persists MLS keys and group state across restarts
+const STATE_DIR = path.join(process.cwd(), '.marmot-state');
+
+class FileBackedKVStore<T = any> {
   private store = new Map<string, T>();
+  private filePath: string;
+
+  constructor(name: string) {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    this.filePath = path.join(STATE_DIR, `${name}.json`);
+    this.loadFromDisk();
+  }
+
+  private loadFromDisk(): void {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        const data = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
+        for (const [k, v] of Object.entries(data)) {
+          this.store.set(k, v as T);
+        }
+        log('STORE', `Loaded ${this.store.size} entries from ${path.basename(this.filePath)}`);
+      }
+    } catch (err: any) {
+      log('WARN', `Failed to load store ${this.filePath}`, { error: err?.message });
+    }
+  }
+
+  private saveToDisk(): void {
+    try {
+      const obj: Record<string, T> = {};
+      for (const [k, v] of this.store) {
+        obj[k] = v;
+      }
+      fs.writeFileSync(this.filePath, JSON.stringify(obj, null, 2), 'utf-8');
+    } catch (err: any) {
+      log('WARN', `Failed to save store ${this.filePath}`, { error: err?.message });
+    }
+  }
 
   async getItem(key: string): Promise<T | null> {
     return this.store.get(key) ?? null;
   }
   async setItem(key: string, value: T): Promise<T> {
     this.store.set(key, value);
+    this.saveToDisk();
     return value;
   }
   async removeItem(key: string): Promise<void> {
     this.store.delete(key);
+    this.saveToDisk();
   }
   async clear(): Promise<void> {
     this.store.clear();
+    this.saveToDisk();
   }
   async keys(): Promise<string[]> {
     return Array.from(this.store.keys());
@@ -294,9 +335,10 @@ async function main() {
   const allRelays = [...new Set([...relays, ...DISCOVERY_RELAYS])];
   const network = new TestNetworkAdapter(allRelays);
 
-  // --- Storage (in-memory, ephemeral) ---
-  const groupStateBackend = new KeyValueGroupStateBackend(new InMemoryKVStore());
-  const keyPackageStore = new KeyPackageStore(new InMemoryKVStore());
+  // --- Storage (file-backed, survives restarts!) ---
+  log('INIT', `State directory: ${STATE_DIR}`);
+  const groupStateBackend = new KeyValueGroupStateBackend(new FileBackedKVStore('group-state'));
+  const keyPackageStore = new KeyPackageStore(new FileBackedKVStore('key-packages'));
 
   // --- MarmotClient ---
   const marmotClient = new MarmotClient({
@@ -310,9 +352,9 @@ async function main() {
   const inviteReader = new InviteReader({
     signer: signer as any,
     store: {
-      received: new InMemoryKVStore(),
-      unread: new InMemoryKVStore(),
-      seen: new InMemoryKVStore(),
+      received: new FileBackedKVStore('invites-received'),
+      unread: new FileBackedKVStore('invites-unread'),
+      seen: new FileBackedKVStore('invites-seen'),
     },
   });
 
