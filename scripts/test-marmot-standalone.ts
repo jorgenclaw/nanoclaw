@@ -516,10 +516,69 @@ async function main() {
     });
   });
 
+  // --- Process ALL historical gift wraps first (critical for ephemeral storage!) ---
+  // Since we use in-memory storage, we lose group state on restart.
+  // White Noise only sends the Welcome once — we must replay it from relays.
+  const seenGiftWrapIds = new Set<string>();
+
+  log('INIT', 'Fetching ALL historical gift wraps (no time filter)...');
+  try {
+    const historicalGiftWraps = await network.request(allRelays, {
+      kinds: [1059],
+      '#p': [pubkey],
+      limit: 50,
+    });
+    log('INIT', `Found ${historicalGiftWraps.length} historical gift wrap(s)`);
+
+    if (historicalGiftWraps.length > 0) {
+      // Mark all as seen
+      for (const gw of historicalGiftWraps) {
+        seenGiftWrapIds.add(gw.id);
+        log('INIT', `  Gift wrap: ${gw.id?.slice(0, 16)}`, {
+          created_at: new Date((gw.created_at || 0) * 1000).toISOString(),
+          contentLen: gw.content?.length,
+        });
+      }
+
+      // Ingest and process
+      const newCount = await inviteReader.ingestEvents(historicalGiftWraps);
+      log('INIT', `Ingested ${newCount} gift wrap(s)`);
+
+      if (newCount > 0) {
+        const invites = await inviteReader.decryptGiftWraps();
+        log('INIT', `Decrypted ${invites.length} invite(s) from historical gift wraps`);
+
+        for (const invite of invites) {
+          log('INIT', `Processing historical invite`, {
+            inviteId: invite.id?.slice(0, 16),
+            kind: (invite as any).kind,
+          });
+
+          try {
+            const { group } = await marmotClient.joinGroupFromWelcome({
+              welcomeRumor: invite,
+            });
+
+            log('INIT', `✅ Joined group from historical welcome!`, {
+              groupId: group.idStr.slice(0, 24) + '...',
+            });
+
+            await inviteReader.markAsRead(invite.id);
+          } catch (joinErr: any) {
+            log('INIT', `Failed to join from historical welcome (may be stale)`, {
+              error: joinErr?.message,
+            });
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    log('ERROR', 'Failed to process historical gift wraps', { error: err?.message });
+  }
+
   // --- Real-time subscription for gift wraps (kind 1059) ---
   // This catches events in real-time as they arrive, no polling delay.
   log('INIT', `Setting up real-time gift wrap subscription on ${allRelays.length} relays...`);
-  const seenGiftWrapIds = new Set<string>();
 
   const giftWrapSub = network.subscribeNative(
     allRelays,
@@ -658,33 +717,44 @@ async function main() {
 
   log('POLL', `Fallback poller started (every ${POLL_INTERVAL_MS}ms on ${allRelays.length} relays)`);
 
-  // --- Also do a broad diagnostic check for ANY kind 1059 events targeting us ---
-  setTimeout(async () => {
+  // --- Periodic diagnostic: re-check for new gift wraps every 30 seconds ---
+  setInterval(async () => {
     try {
-      log('DIAG', 'Running diagnostic: checking for ANY gift wraps on all relays (no time filter)...');
       const allGiftWraps = await network.request(allRelays, {
         kinds: [1059],
         '#p': [pubkey],
-        limit: 20,
+        limit: 50,
       });
-      log('DIAG', `Found ${allGiftWraps.length} total gift wrap(s) for our pubkey (all time)`, {
-        eventIds: allGiftWraps.map((e: any) => e.id?.slice(0, 12)).join(', '),
-      });
-      if (allGiftWraps.length > 0) {
-        for (const gw of allGiftWraps) {
-          log('DIAG', `  Gift wrap detail`, {
-            id: gw.id?.slice(0, 16),
-            created_at: new Date((gw.created_at || 0) * 1000).toISOString(),
-            pubkey: gw.pubkey?.slice(0, 12),
-            tags: gw.tags?.map((t: any[]) => t[0]).join(','),
-            contentLen: gw.content?.length,
-          });
+      const newOnes = allGiftWraps.filter((e: any) => !seenGiftWrapIds.has(e.id));
+      if (newOnes.length > 0) {
+        log('DIAG', `Found ${newOnes.length} NEW gift wrap(s) via periodic broad scan`);
+        for (const gw of newOnes) {
+          seenGiftWrapIds.add(gw.id);
+        }
+        const newCount = await inviteReader.ingestEvents(newOnes);
+        if (newCount > 0) {
+          const invites = await inviteReader.decryptGiftWraps();
+          for (const invite of invites) {
+            try {
+              const { group } = await marmotClient.joinGroupFromWelcome({
+                welcomeRumor: invite,
+              });
+              log('DIAG', `✅ Joined group from welcome (broad scan)`, {
+                groupId: group.idStr.slice(0, 24) + '...',
+              });
+              await inviteReader.markAsRead(invite.id);
+            } catch (joinErr: any) {
+              log('ERROR', 'Failed to join from welcome (broad scan)', {
+                error: joinErr?.message,
+              });
+            }
+          }
         }
       }
-    } catch (err: any) {
-      log('DIAG', 'Diagnostic check failed', { error: err?.message });
+    } catch {
+      // Silent fail on periodic check
     }
-  }, 8000); // Run 8 seconds after boot
+  }, 30000); // Every 30 seconds
 
   // --- Stdin reader for sending messages ---
   const rl = readline.createInterface({
