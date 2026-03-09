@@ -39,6 +39,7 @@ import {
   InviteReader,
   deserializeApplicationRumor,
   getNostrGroupIdHex,
+  getMediaAttachments,
   GROUP_EVENT_KIND,
   KEY_PACKAGE_KIND,
   KEY_PACKAGE_RELAY_LIST_KIND,
@@ -544,11 +545,39 @@ async function main() {
                       ? new Date(rumor.created_at * 1000).toISOString()
                       : new Date().toISOString();
 
+                    // Check for media attachments (MIP-04 imeta tags)
+                    const tags = rumor.tags || [];
+                    const mediaAttachments = getMediaAttachments(tags);
+
                     console.log('');
-                    log('MSG', `[${groupName}] <${senderShort}> ${content}`, {
-                      timestamp,
-                      eventId: event.id?.slice(0, 16),
-                    });
+                    if (mediaAttachments.length > 0) {
+                      log('MSG', `[${groupName}] <${senderShort}> ${content || '[media]'}`, {
+                        timestamp,
+                        eventId: event.id?.slice(0, 16),
+                        attachments: mediaAttachments.length,
+                      });
+                      for (const att of mediaAttachments) {
+                        log('MEDIA', `  📎 ${att.filename} (${att.type}, ${att.size ? att.size + ' bytes' : 'unknown size'})`, {
+                          sha256: att.sha256?.slice(0, 16) + '...',
+                          nonce: att.nonce?.slice(0, 12) + '...',
+                          url: att.url || 'no URL',
+                          dimensions: att.dimensions || 'unknown',
+                          version: att.version,
+                        });
+                      }
+                    } else {
+                      log('MSG', `[${groupName}] <${senderShort}> ${content}`, {
+                        timestamp,
+                        eventId: event.id?.slice(0, 16),
+                      });
+                      // Log tags if content is empty (might be unsupported media format)
+                      if (!content.trim() && tags.length > 0) {
+                        log('DEBUG', `Rumor has ${tags.length} tag(s) but no text content`, {
+                          kind: rumor.kind,
+                          tags: JSON.stringify(tags).slice(0, 500),
+                        });
+                      }
+                    }
                     console.log('');
                   } catch (deserializeErr: any) {
                     log('WARN', 'Failed to deserialize application rumor', {
