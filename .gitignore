@@ -17,6 +17,9 @@ groups/main/*
 groups/global/*
 !groups/main/CLAUDE.md
 !groups/main/soul.md
+!groups/main/docs/
+groups/main/docs/*
+!groups/main/docs/key-safety-report.md
 !groups/global/CLAUDE.md
 
 # Secrets
