@@ -590,6 +590,46 @@ clawstr-post sign '{"kind":1,"content":"hello","tags":[]}'
 
 ---
 
+## Lightning Wallet (NWC)
+
+You have a Lightning wallet connected via Nostr Wallet Connect (NIP-47). The wallet is hosted by Rizful. The NWC connection string (a wallet session key, NOT your main nsec) is stored at `/workspace/group/config/nwc.json`.
+
+**Commands:**
+```bash
+# Check balance (shows sats + USD + daily spend)
+nwc-wallet balance
+
+# Create a Lightning invoice to receive sats
+nwc-wallet invoice 100 "thanks for the zap"
+
+# Pay a Lightning invoice
+nwc-wallet pay lnbc...
+
+# Pay after user confirmed (skip confirmation prompt)
+nwc-wallet pay-confirmed lnbc...
+
+# Zap a Nostr user
+nwc-wallet zap npub1... 100
+
+# Show daily spending status
+nwc-wallet spend-status
+```
+
+**Spending controls (enforced automatically):**
+- **Daily cap:** 10,000 sats — rejects payments that would exceed
+- **Per-transaction cap:** 5,000 sats — hard reject above this
+- **Confirmation threshold:** 1,000 sats — amounts above this require Scott to reply "yes"
+
+Spending is tracked in `/workspace/group/config/spending.json` and persists across sessions.
+
+**Zap flow:** When zapping, the tool resolves the recipient's Lightning address from their Nostr profile, builds a kind 9734 zap request (signed via the signing daemon — your main nsec never enters the container), fetches an invoice from the recipient's LNURL endpoint, and pays it via NWC.
+
+**If `nwc-wallet` fails with "Cannot read NWC config":** The config file may be missing. Check `/workspace/group/config/nwc.json`.
+
+**If `nwc-wallet` fails with "NWC request timed out":** The Rizful relay may be down. Tell Scott.
+
+---
+
 ## Global Memory
 
 You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.

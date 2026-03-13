@@ -303,6 +303,16 @@ function buildVolumeMounts(
     });
   }
 
+  // NWC wallet tool: mount the CLI script into the container
+  const nwcWalletDir = path.join(projectRoot, 'tools', 'nwc-wallet');
+  if (fs.existsSync(path.join(nwcWalletDir, 'index.js'))) {
+    mounts.push({
+      hostPath: nwcWalletDir,
+      containerPath: '/usr/local/lib/nwc-wallet',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(

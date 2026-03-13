@@ -56,6 +56,9 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 # Create clawstr-post wrapper (actual script is mounted at runtime from host)
 RUN printf '#!/bin/bash\nnode /usr/local/lib/nostr-signer/clawstr-post.js "$@"\n' > /usr/local/bin/clawstr-post && chmod +x /usr/local/bin/clawstr-post
 
+# Create nwc-wallet wrapper (NWC Lightning wallet CLI, mounted at runtime)
+RUN printf '#!/bin/bash\nnode /usr/local/lib/nwc-wallet/index.js "$@"\n' > /usr/local/bin/nwc-wallet && chmod +x /usr/local/bin/nwc-wallet
+
 # Create entrypoint script
 # Container input (prompt, group info) is passed via stdin JSON.
 # Credentials are injected by the host's credential proxy — never passed here.
