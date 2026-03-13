@@ -11,6 +11,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'SIGNAL_PHONE_NUMBER',
   'TRIGGER_WORD',
+  'WN_ACCOUNT_PUBKEY',
 ]);
 
 export const ASSISTANT_NAME =
@@ -34,10 +35,15 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
   'nanoclaw',
   'mount-allowlist.json',
 );
+export const SENDER_ALLOWLIST_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'sender-allowlist.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
-export const MAIN_GROUP_FOLDER = 'main';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
@@ -74,7 +80,10 @@ const VOICE_MENTION_PATTERN = new RegExp(
 );
 
 export function messageHasTrigger(content: string): boolean {
-  const trimmed = content.trim();
+  // Signal stores U+FFFC as a mention placeholder. For new messages these are
+  // resolved in SignalChannel, but historical DB records may still contain them.
+  // Treat a leading U+FFFC as "@TriggerWord" for backwards compatibility.
+  const trimmed = content.replace(/^\uFFFC\s*/, `@${TRIGGER_WORD} `).trim();
   if (trimmed.startsWith('[Voice:')) return VOICE_MENTION_PATTERN.test(trimmed);
   return TRIGGER_PATTERN.test(trimmed);
 }
@@ -92,6 +101,23 @@ export const SIGNAL_CLI_TCP_PORT = parseInt(
   process.env.SIGNAL_CLI_TCP_PORT || '7583',
   10,
 );
+
+// White Noise (Nostr/MLS encrypted messaging)
+export const WN_BINARY_PATH =
+  process.env.WN_BINARY_PATH ||
+  path.join(HOME_DIR, 'whitenoise-rs', 'target', 'release', 'wn');
+export const WN_SOCKET_PATH =
+  process.env.WN_SOCKET_PATH ||
+  path.join(
+    HOME_DIR,
+    '.local',
+    'share',
+    'whitenoise-cli',
+    'release',
+    'wnd.sock',
+  );
+export const WN_ACCOUNT_PUBKEY =
+  process.env.WN_ACCOUNT_PUBKEY || envConfig.WN_ACCOUNT_PUBKEY || '';
 
 // Local Whisper transcription (whisper-cli from whisper.cpp)
 // Set WHISPER_BIN to empty string to disable and fall back to OpenAI only.

@@ -4,13 +4,15 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   IDLE_TIMEOUT,
-  MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
   SIGNAL_PHONE_NUMBER,
+  TIMEZONE,
   TRIGGER_PATTERN,
+  WN_ACCOUNT_PUBKEY,
   messageHasTrigger,
 } from './config.js';
 import { SignalChannel } from './channels/signal.js';
+import { WhiteNoiseChannel } from './channels/whitenoise.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -28,6 +30,7 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
+  getRegisteredGroup,
   getRouterState,
   initDatabase,
   logTokenUsage,
@@ -41,8 +44,15 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  isSenderAllowed,
+  isTriggerAllowed,
+  loadSenderAllowlist,
+  shouldDropMessage,
+} from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { initHealthMonitor, reportError } from './health.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -150,7 +160,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+  const isMainGroup = group.isMain === true;
 
   const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
@@ -163,11 +173,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
-    const hasTrigger = missedMessages.some((m) => messageHasTrigger(m.content));
+    const allowlistCfg = loadSenderAllowlist();
+    const hasTrigger = missedMessages.some(
+      (m) =>
+        messageHasTrigger(m.content) &&
+        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+    );
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages);
+  const prompt = formatMessages(missedMessages, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -258,7 +273,7 @@ async function runAgent(
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
-  const isMain = group.folder === MAIN_GROUP_FOLDER;
+  const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -340,12 +355,32 @@ async function runAgent(
         { group: group.name, error: output.error },
         'Container agent error',
       );
+      const errMsg = output.error || 'Unknown error';
+      if (
+        errMsg.includes('401') ||
+        errMsg.includes('authentication') ||
+        errMsg.includes('token')
+      ) {
+        await reportError(
+          'auth-failure',
+          `Authentication error in ${group.name}: ${errMsg.slice(0, 200)}`,
+        );
+      } else {
+        await reportError(
+          `agent-error:${group.folder}`,
+          `Agent error in ${group.name}: ${errMsg.slice(0, 200)}`,
+        );
+      }
       return 'error';
     }
 
     return 'success';
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
+    await reportError(
+      `agent-crash:${group.folder}`,
+      `Agent crashed in ${group.name}: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return 'error';
   }
 }
@@ -357,7 +392,7 @@ async function runAgent(
 async function checkNewContactDMs(): Promise<void> {
   const registeredJids = new Set(Object.keys(registeredGroups));
   const adminJid = Object.entries(registeredGroups).find(
-    ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+    ([, g]) => g.folder === 'main',
   )?.[0];
   if (!adminJid) return;
 
@@ -439,15 +474,19 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
+          const isMainGroup = group.isMain === true;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
-            const hasTrigger = groupMessages.some((m) =>
-              messageHasTrigger(m.content),
+            const allowlistCfg = loadSenderAllowlist();
+            const hasTrigger = groupMessages.some(
+              (m) =>
+                messageHasTrigger(m.content) &&
+                (m.is_from_me ||
+                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
           }
@@ -461,7 +500,7 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend);
+          const formatted = formatMessages(messagesToSend, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -535,7 +574,25 @@ async function main(): Promise<void> {
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
-    onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
+    onMessage: (chatJid: string, msg: NewMessage) => {
+      // Sender allowlist drop mode: discard messages from denied senders before storing
+      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+        const cfg = loadSenderAllowlist();
+        if (
+          shouldDropMessage(chatJid, cfg) &&
+          !isSenderAllowed(chatJid, msg.sender, cfg)
+        ) {
+          if (cfg.logDenied) {
+            logger.debug(
+              { chatJid, sender: msg.sender },
+              'sender-allowlist: dropping message (drop mode)',
+            );
+          }
+          return;
+        }
+      }
+      storeMessage(msg);
+    },
     onChatMetadata: (
       chatJid: string,
       timestamp: string,
@@ -550,6 +607,28 @@ async function main(): Promise<void> {
   const signal = new SignalChannel(channelOpts);
   channels.push(signal);
   await signal.connect();
+
+  // White Noise channel (optional — only when WN_ACCOUNT_PUBKEY is configured)
+  if (WN_ACCOUNT_PUBKEY) {
+    try {
+      const whitenoise = new WhiteNoiseChannel(channelOpts);
+      channels.push(whitenoise);
+      await whitenoise.connect();
+    } catch (err) {
+      logger.warn(
+        { err },
+        'White Noise channel failed to connect (continuing without it)',
+      );
+    }
+  }
+
+  // Initialize health monitor — sends alerts to admin (main group) on errors
+  const mainEntry = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === 'main',
+  );
+  if (mainEntry) {
+    initHealthMonitor({ adminJid: mainEntry[0], channel: signal });
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -574,9 +653,30 @@ async function main(): Promise<void> {
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
     },
+    sendReaction: (jid, messageId, emoji, targetAuthor) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (!channel.sendReaction) return Promise.resolve();
+      return channel.sendReaction(jid, messageId, emoji, targetAuthor);
+    },
+    sendImage: (jid, filePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (!channel.sendImage) {
+        logger.warn({ jid }, 'Channel does not support sendImage');
+        return Promise.resolve();
+      }
+      return channel.sendImage(jid, filePath, caption);
+    },
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: () => Promise.resolve(),
+    syncGroups: async (force: boolean) => {
+      await Promise.all(
+        channels
+          .filter((ch) => ch.syncGroups)
+          .map((ch) => ch.syncGroups!(force)),
+      );
+    },
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),

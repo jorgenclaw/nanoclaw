@@ -9,6 +9,7 @@ import { toFile } from 'openai/uploads';
 
 import { WHISPER_BIN, WHISPER_MODEL } from './config.js';
 import { readEnvFile } from './env.js';
+import { reportError } from './health.js';
 import { logger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -92,6 +93,10 @@ export async function transcribeAudio(filePath: string): Promise<string> {
         logger.warn(
           { err: localErr, WHISPER_BIN, WHISPER_MODEL },
           'Local whisper failed, falling back to OpenAI',
+        );
+        await reportError(
+          'whisper-local',
+          `Local whisper-cli failed: ${localErr instanceof Error ? localErr.message : String(localErr)}. Falling back to OpenAI API.`,
         );
       }
     }

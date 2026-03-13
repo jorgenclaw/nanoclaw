@@ -77,6 +77,17 @@ function buildVolumeMounts(
       readonly: true,
     });
 
+    // Shadow .env so the agent cannot read secrets from the mounted project root.
+    // Secrets are passed via stdin instead (see readSecrets()).
+    const envFile = path.join(projectRoot, '.env');
+    if (fs.existsSync(envFile)) {
+      mounts.push({
+        hostPath: '/dev/null',
+        containerPath: '/workspace/project/.env',
+        readonly: true,
+      });
+    }
+
     // Main also gets its group folder as the working directory
     mounts.push({
       hostPath: groupDir,
@@ -136,6 +147,20 @@ function buildVolumeMounts(
     );
   }
 
+  // Sync OAuth credentials so the container can auto-refresh tokens.
+  // This avoids the need for a static CLAUDE_CODE_OAUTH_TOKEN in .env.
+  const hostCredentials = path.join(
+    os.homedir(),
+    '.claude',
+    '.credentials.json',
+  );
+  if (fs.existsSync(hostCredentials)) {
+    fs.copyFileSync(
+      hostCredentials,
+      path.join(groupSessionsDir, '.credentials.json'),
+    );
+  }
+
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
@@ -180,7 +205,7 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
+  if (fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
@@ -206,6 +231,76 @@ function buildVolumeMounts(
     });
   }
 
+  // White Noise CLI: mount container-compatible wn binary (built against glibc 2.36)
+  // The host-compiled binary won't work in the container due to glibc version mismatch
+  const wnBin = path.join(
+    os.homedir(),
+    'whitenoise-rs',
+    'target',
+    'container',
+    'wn',
+  );
+  const wndBin = path.join(
+    os.homedir(),
+    'whitenoise-rs',
+    'target',
+    'release',
+    'wnd',
+  );
+  if (fs.existsSync(wnBin)) {
+    mounts.push({
+      hostPath: wnBin,
+      containerPath: '/usr/local/bin/wn',
+      readonly: true,
+    });
+  }
+  if (fs.existsSync(wndBin)) {
+    mounts.push({
+      hostPath: wndBin,
+      containerPath: '/usr/local/bin/wnd',
+      readonly: true,
+    });
+  }
+
+  // White Noise daemon socket: allows wn CLI in container to talk to host wnd daemon
+  const wndSocketDir = path.join(
+    os.homedir(),
+    '.local',
+    'share',
+    'whitenoise-cli',
+    'release',
+  );
+  if (fs.existsSync(wndSocketDir)) {
+    mounts.push({
+      hostPath: wndSocketDir,
+      containerPath: '/run/whitenoise',
+      readonly: false,
+    });
+  }
+
+  // Nostr signing daemon socket: allows agent to sign events without seeing the private key
+  const nostrSignerSocket = path.join(
+    process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() || 1000}`,
+    'nostr-signer.sock',
+  );
+  if (fs.existsSync(nostrSignerSocket)) {
+    mounts.push({
+      hostPath: nostrSignerSocket,
+      containerPath: '/run/nostr/signer.sock',
+      readonly: false, // sockets need read-write for bidirectional communication
+    });
+  }
+
+  // Nostr signing tools: mount clawstr-post script + dependencies into container
+  const clawstrPostDir = path.join(projectRoot, 'tools', 'nostr-signer');
+  if (fs.existsSync(path.join(clawstrPostDir, 'clawstr-post.js'))) {
+    mounts.push({
+      hostPath: clawstrPostDir,
+      containerPath: '/usr/local/lib/nostr-signer',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -227,9 +322,12 @@ function readSecrets(): Record<string, string> {
   return readEnvFile([
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_API_KEY',
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_AUTH_TOKEN',
     'BW_CLIENTID',
     'BW_CLIENTSECRET',
     'BW_PASSWORD',
+    'GITHUB_TOKEN',
   ]);
 }
 

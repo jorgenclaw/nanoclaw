@@ -1,25 +1,79 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import {
-  DATA_DIR,
-  IPC_POLL_INTERVAL,
-  MAIN_GROUP_FOLDER,
-  TIMEZONE,
-} from './config.js';
+import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
+/**
+ * Map a container file path back to the host filesystem.
+ * Known mount mappings:
+ *   /workspace/group/    → groups/<folder>/
+ *   /workspace/attachments/ → ~/.local/share/signal-cli/attachments/
+ *   /run/whitenoise/media_cache/ → ~/.local/share/whitenoise-cli/release/media_cache/
+ *   /workspace/ipc/      → data/ipc/<folder>/
+ */
+function resolveContainerPath(
+  containerPath: string,
+  groupFolder: string,
+): string | null {
+  if (containerPath.startsWith('/workspace/group/')) {
+    const relative = containerPath.slice('/workspace/group/'.length);
+    return path.join(GROUPS_DIR, groupFolder, relative);
+  }
+  if (containerPath.startsWith('/workspace/attachments/')) {
+    const relative = containerPath.slice('/workspace/attachments/'.length);
+    return path.join(
+      os.homedir(),
+      '.local',
+      'share',
+      'signal-cli',
+      'attachments',
+      relative,
+    );
+  }
+  if (containerPath.startsWith('/run/whitenoise/media_cache/')) {
+    const relative = containerPath.slice('/run/whitenoise/media_cache/'.length);
+    return path.join(
+      os.homedir(),
+      '.local',
+      'share',
+      'whitenoise-cli',
+      'release',
+      'media_cache',
+      relative,
+    );
+  }
+  if (containerPath.startsWith('/workspace/ipc/')) {
+    const relative = containerPath.slice('/workspace/ipc/'.length);
+    return path.join(DATA_DIR, 'ipc', groupFolder, relative);
+  }
+  // Unknown path — return null (don't allow arbitrary host paths)
+  return null;
+}
+
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendReaction: (
+    jid: string,
+    messageId: string,
+    emoji: string,
+    targetAuthor?: string,
+  ) => Promise<void>;
+  sendImage: (
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
-  syncGroupMetadata: (force: boolean) => Promise<void>;
+  syncGroups: (force: boolean) => Promise<void>;
   getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
     groupFolder: string,
@@ -57,8 +111,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
     const registeredGroups = deps.registeredGroups();
 
+    // Build folder→isMain lookup from registered groups
+    const folderIsMain = new Map<string, boolean>();
+    for (const group of Object.values(registeredGroups)) {
+      if (group.isMain) folderIsMain.set(group.folder, true);
+    }
+
     for (const sourceGroup of groupFolders) {
-      const isMain = sourceGroup === MAIN_GROUP_FOLDER;
+      const isMain = folderIsMain.get(sourceGroup) === true;
       const messagesDir = path.join(ipcBaseDir, sourceGroup, 'messages');
       const tasksDir = path.join(ipcBaseDir, sourceGroup, 'tasks');
 
@@ -88,6 +148,79 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'reaction' &&
+                data.chatJid &&
+                data.messageId &&
+                data.emoji
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  await deps.sendReaction(
+                    data.chatJid,
+                    data.messageId,
+                    data.emoji,
+                    data.targetAuthor,
+                  );
+                  logger.info(
+                    { chatJid: data.chatJid, emoji: data.emoji, sourceGroup },
+                    'IPC reaction sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC reaction attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'image' &&
+                data.chatJid &&
+                data.filePath
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  // Resolve container path to host path
+                  const hostPath = resolveContainerPath(
+                    data.filePath,
+                    sourceGroup,
+                  );
+                  if (hostPath && fs.existsSync(hostPath)) {
+                    await deps.sendImage(
+                      data.chatJid,
+                      hostPath,
+                      data.caption,
+                    );
+                    logger.info(
+                      {
+                        chatJid: data.chatJid,
+                        filePath: hostPath,
+                        sourceGroup,
+                      },
+                      'IPC image sent',
+                    );
+                  } else {
+                    logger.warn(
+                      {
+                        chatJid: data.chatJid,
+                        containerPath: data.filePath,
+                        hostPath,
+                        sourceGroup,
+                      },
+                      'IPC image file not found on host',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC image attempt blocked',
                   );
                 }
               }
@@ -235,18 +368,20 @@ export async function processTaskIpc(
           }
           nextRun = new Date(Date.now() + ms).toISOString();
         } else if (scheduleType === 'once') {
-          const scheduled = new Date(data.schedule_value);
-          if (isNaN(scheduled.getTime())) {
+          const date = new Date(data.schedule_value);
+          if (isNaN(date.getTime())) {
             logger.warn(
               { scheduleValue: data.schedule_value },
               'Invalid timestamp',
             );
             break;
           }
-          nextRun = scheduled.toISOString();
+          nextRun = date.toISOString();
         }
 
-        const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const taskId =
+          data.taskId ||
+          `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const contextMode =
           data.context_mode === 'group' || data.context_mode === 'isolated'
             ? data.context_mode
@@ -324,6 +459,70 @@ export async function processTaskIpc(
       }
       break;
 
+    case 'update_task':
+      if (data.taskId) {
+        const task = getTaskById(data.taskId);
+        if (!task) {
+          logger.warn(
+            { taskId: data.taskId, sourceGroup },
+            'Task not found for update',
+          );
+          break;
+        }
+        if (!isMain && task.group_folder !== sourceGroup) {
+          logger.warn(
+            { taskId: data.taskId, sourceGroup },
+            'Unauthorized task update attempt',
+          );
+          break;
+        }
+
+        const updates: Parameters<typeof updateTask>[1] = {};
+        if (data.prompt !== undefined) updates.prompt = data.prompt;
+        if (data.schedule_type !== undefined)
+          updates.schedule_type = data.schedule_type as
+            | 'cron'
+            | 'interval'
+            | 'once';
+        if (data.schedule_value !== undefined)
+          updates.schedule_value = data.schedule_value;
+
+        // Recompute next_run if schedule changed
+        if (data.schedule_type || data.schedule_value) {
+          const updatedTask = {
+            ...task,
+            ...updates,
+          };
+          if (updatedTask.schedule_type === 'cron') {
+            try {
+              const interval = CronExpressionParser.parse(
+                updatedTask.schedule_value,
+                { tz: TIMEZONE },
+              );
+              updates.next_run = interval.next().toISOString();
+            } catch {
+              logger.warn(
+                { taskId: data.taskId, value: updatedTask.schedule_value },
+                'Invalid cron in task update',
+              );
+              break;
+            }
+          } else if (updatedTask.schedule_type === 'interval') {
+            const ms = parseInt(updatedTask.schedule_value, 10);
+            if (!isNaN(ms) && ms > 0) {
+              updates.next_run = new Date(Date.now() + ms).toISOString();
+            }
+          }
+        }
+
+        updateTask(data.taskId, updates);
+        logger.info(
+          { taskId: data.taskId, sourceGroup, updates },
+          'Task updated via IPC',
+        );
+      }
+      break;
+
     case 'refresh_groups':
       // Only main group can request a refresh
       if (isMain) {
@@ -331,7 +530,7 @@ export async function processTaskIpc(
           { sourceGroup },
           'Group metadata refresh requested via IPC',
         );
-        await deps.syncGroupMetadata(true);
+        await deps.syncGroups(true);
         // Write updated snapshot immediately
         const availableGroups = deps.getAvailableGroups();
         deps.writeGroupsSnapshot(
@@ -365,6 +564,7 @@ export async function processTaskIpc(
           );
           break;
         }
+        // Defense in depth: agent cannot set isMain via IPC
         deps.registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,

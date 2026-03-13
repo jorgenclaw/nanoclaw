@@ -8,6 +8,7 @@ import {
   SIGNAL_CLI_TCP_PORT,
   SIGNAL_PHONE_NUMBER,
 } from '../config.js';
+import { reportError, clearAlert } from '../health.js';
 import { logger } from '../logger.js';
 import { transcribeAudio } from '../transcription.js';
 import {
@@ -56,6 +57,14 @@ const SIGNAL_CLI_ATTACHMENTS_DIR = path.join(
   'attachments',
 );
 
+interface SignalMention {
+  start?: number;
+  length?: number;
+  uuid?: string;
+  number?: string;
+  name?: string;
+}
+
 interface SignalEnvelope {
   source?: string;
   sourceNumber?: string;
@@ -64,6 +73,7 @@ interface SignalEnvelope {
   dataMessage?: {
     timestamp?: number;
     message?: string;
+    mentions?: SignalMention[];
     attachments?: SignalAttachment[];
     groupInfo?: {
       groupId?: string;
@@ -84,6 +94,32 @@ interface SignalEnvelope {
       };
     };
   };
+}
+
+/**
+ * Resolve Signal mention placeholders (U+FFFC) to readable "@name" text.
+ * Signal replaces each @mention in the message body with a single U+FFFC character.
+ * signal-cli provides a `mentions` array with the name/number for each.
+ * We replace each U+FFFC with "@name" so trigger detection and display work correctly.
+ */
+function resolveMentions(text: string, mentions?: SignalMention[]): string {
+  if (!mentions || mentions.length === 0) return text;
+
+  // Build a name lookup for each mention by start position.
+  // We process U+FFFC characters left-to-right, matching to mentions sorted by position.
+  const sorted = [...mentions].sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
+  let mentionIdx = 0;
+  let result = '';
+  for (const ch of text) {
+    if (ch === '\uFFFC' && mentionIdx < sorted.length) {
+      const m = sorted[mentionIdx++];
+      const name = m.name || m.number || m.uuid || 'unknown';
+      result += `@${name}`;
+    } else {
+      result += ch;
+    }
+  }
+  return result;
 }
 
 function jidFromPhone(phone: string): string {
@@ -119,6 +155,7 @@ export class SignalChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
 
   private opts: SignalChannelOpts;
 
@@ -138,6 +175,8 @@ export class SignalChannel implements Channel {
 
     socket.on('connect', () => {
       this.connected = true;
+      this.reconnectAttempts = 0;
+      clearAlert('signal-disconnect');
       logger.info(
         { host: SIGNAL_CLI_TCP_HOST, port: SIGNAL_CLI_TCP_PORT },
         'Connected to signal-cli',
@@ -200,6 +239,13 @@ export class SignalChannel implements Channel {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
+    this.reconnectAttempts++;
+    if (this.reconnectAttempts === 3) {
+      reportError(
+        'signal-disconnect',
+        `Signal connection lost. Failed to reconnect ${this.reconnectAttempts} times.`,
+      );
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       logger.info('Reconnecting to signal-cli...');
@@ -301,7 +347,7 @@ export class SignalChannel implements Channel {
 
     let content: string;
     if (dataMsg.message) {
-      content = dataMsg.message;
+      content = resolveMentions(dataMsg.message, dataMsg.mentions);
     } else if (audioAttachment) {
       // signal-cli stores attachments as ~/.local/share/signal-cli/attachments/<id>
       const filePath =
@@ -422,6 +468,69 @@ export class SignalChannel implements Channel {
 
   async setTyping(_jid: string, _isTyping: boolean): Promise<void> {
     // signal-cli doesn't expose typing indicators via JSON-RPC daemon
+  }
+
+  async sendReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+    targetAuthor?: string,
+  ): Promise<void> {
+    if (!this.connected) return;
+    const parsed = parseJid(jid);
+    if (!parsed) return;
+    const targetTimestamp = parseInt(messageId, 10);
+    if (isNaN(targetTimestamp)) {
+      logger.warn(
+        { jid, messageId },
+        'Signal reaction skipped: messageId is not a valid timestamp',
+      );
+      return;
+    }
+    const params: Record<string, unknown> = {
+      account: SIGNAL_PHONE_NUMBER,
+      emoji,
+      targetAuthor:
+        targetAuthor ||
+        (parsed.type === 'individual' ? parsed.phone : undefined) ||
+        SIGNAL_PHONE_NUMBER,
+      targetTimestamp,
+    };
+    if (parsed.type === 'group') {
+      params.groupId = parsed.groupId;
+    } else {
+      params.recipient = [parsed.phone];
+    }
+    this.sendRpc('sendReaction', params);
+    logger.info({ jid, emoji, messageId }, 'Signal reaction sent');
+  }
+
+  async sendImage(
+    jid: string,
+    filePath: string,
+    caption?: string,
+  ): Promise<void> {
+    if (!this.connected) {
+      logger.warn({ jid, filePath }, 'Signal disconnected, cannot send image');
+      return;
+    }
+    const parsed = parseJid(jid);
+    if (!parsed) {
+      logger.warn({ jid }, 'Cannot send image: invalid Signal JID');
+      return;
+    }
+    const params: Record<string, unknown> = {
+      account: SIGNAL_PHONE_NUMBER,
+      message: caption || '',
+      attachment: [filePath],
+    };
+    if (parsed.type === 'group') {
+      params.groupId = parsed.groupId;
+    } else {
+      params.recipient = [parsed.phone];
+    }
+    this.sendRpc('send', params);
+    logger.info({ jid, filePath, hasCaption: !!caption }, 'Signal image sent');
   }
 
   private async flushOutgoingQueue(): Promise<void> {

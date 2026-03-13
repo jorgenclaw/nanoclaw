@@ -328,7 +328,7 @@ describe('SignalChannel', () => {
       expect(opts.onChatMetadata).toHaveBeenCalledWith(
         'signal:+1555111111',
         expect.any(String),
-        undefined,
+        'Bob',
         'signal',
         false,
       );

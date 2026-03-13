@@ -7,6 +7,7 @@ FROM node:22-slim
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
+    fonts-noto-cjk \
     fonts-noto-color-emoji \
     libgbm1 \
     libnss3 \
@@ -23,6 +24,8 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    imagemagick \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
@@ -49,6 +52,9 @@ RUN npm run build
 
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
+
+# Create clawstr-post wrapper (actual script is mounted at runtime from host)
+RUN printf '#!/bin/bash\nnode /usr/local/lib/nostr-signer/clawstr-post.js "$@"\n' > /usr/local/bin/clawstr-post && chmod +x /usr/local/bin/clawstr-post
 
 # Create entrypoint script
 # Secrets are passed via stdin JSON — temp file is deleted immediately after Node reads it
