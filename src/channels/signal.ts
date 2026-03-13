@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import net from 'net';
 import os from 'os';
 import path from 'path';
@@ -156,6 +157,9 @@ export class SignalChannel implements Channel {
   private flushing = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private lastGroupDataMessage = Date.now();
+  private lastSignalCliRestart = Date.now();
 
   private opts: SignalChannelOpts;
 
@@ -164,9 +168,10 @@ export class SignalChannel implements Channel {
   }
 
   async connect(): Promise<void> {
-    return new Promise<void>((resolve) => {
+    await new Promise<void>((resolve) => {
       this.connectInternal(resolve);
     });
+    this.startWatchdog();
   }
 
   private connectInternal(onFirstOpen?: () => void): void {
@@ -379,6 +384,7 @@ export class SignalChannel implements Channel {
       chatJid = jidFromGroupId(dataMsg.groupInfo.groupId);
       isGroup = true;
       groupName = dataMsg.groupContext?.title;
+      this.lastGroupDataMessage = Date.now();
     } else {
       chatJid = jidFromPhone(senderId);
       isGroup = false;
@@ -463,6 +469,10 @@ export class SignalChannel implements Channel {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
     this.socket?.destroy();
   }
 
@@ -531,6 +541,56 @@ export class SignalChannel implements Channel {
     }
     this.sendRpc('send', params);
     logger.info({ jid, filePath, hasCaption: !!caption }, 'Signal image sent');
+  }
+
+  /**
+   * Periodic watchdog that restarts signal-cli when group messages stop arriving.
+   * signal-cli's TCP daemon can go stale for group delivery after long uptime
+   * while DMs and receipts continue working normally.
+   */
+  private startWatchdog(): void {
+    if (this.watchdogTimer) return;
+    // Check every 10 minutes
+    this.watchdogTimer = setInterval(() => {
+      const now = Date.now();
+      const hasRegisteredGroups = Object.keys(this.opts.registeredGroups()).some(
+        (jid) => jid.startsWith('signal:group.'),
+      );
+      if (!hasRegisteredGroups) return;
+
+      const hoursSinceGroupMsg =
+        (now - this.lastGroupDataMessage) / (1000 * 60 * 60);
+      const hoursSinceRestart =
+        (now - this.lastSignalCliRestart) / (1000 * 60 * 60);
+
+      // Restart if no group messages for 2+ hours, or every 8 hours as a safety net
+      if (hoursSinceGroupMsg >= 2 || hoursSinceRestart >= 8) {
+        logger.info(
+          {
+            hoursSinceGroupMsg: hoursSinceGroupMsg.toFixed(1),
+            hoursSinceRestart: hoursSinceRestart.toFixed(1),
+          },
+          'Watchdog: restarting signal-cli to prevent stale group delivery',
+        );
+        this.restartSignalCli();
+      }
+    }, 10 * 60 * 1000);
+  }
+
+  private restartSignalCli(): void {
+    try {
+      this.lastSignalCliRestart = Date.now();
+      this.lastGroupDataMessage = Date.now(); // Reset to avoid immediate re-trigger
+      execSync('systemctl --user restart signal-cli', { timeout: 15000 });
+      logger.info('signal-cli restarted by watchdog');
+      // The TCP socket close event will trigger reconnection automatically
+    } catch (err) {
+      logger.error({ err }, 'Watchdog failed to restart signal-cli');
+      reportError(
+        'signal-cli-watchdog',
+        'Failed to restart signal-cli via watchdog',
+      );
+    }
   }
 
   private async flushOutgoingQueue(): Promise<void> {
