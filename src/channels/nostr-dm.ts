@@ -320,10 +320,14 @@ export class NostrDMChannel implements Channel {
     this.profileFetching.add(pubkey);
 
     try {
-      const event = await this.pool.get(NOSTR_DM_RELAYS, {
-        kinds: [0],
-        authors: [pubkey],
-      }, { maxWait: 5000 });
+      const event = await this.pool.get(
+        NOSTR_DM_RELAYS,
+        {
+          kinds: [0],
+          authors: [pubkey],
+        },
+        { maxWait: 5000 },
+      );
       if (event?.content) {
         const meta = JSON.parse(event.content);
         const name =
