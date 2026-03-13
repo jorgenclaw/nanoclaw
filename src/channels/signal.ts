@@ -551,30 +551,33 @@ export class SignalChannel implements Channel {
   private startWatchdog(): void {
     if (this.watchdogTimer) return;
     // Check every 10 minutes
-    this.watchdogTimer = setInterval(() => {
-      const now = Date.now();
-      const hasRegisteredGroups = Object.keys(this.opts.registeredGroups()).some(
-        (jid) => jid.startsWith('signal:group.'),
-      );
-      if (!hasRegisteredGroups) return;
+    this.watchdogTimer = setInterval(
+      () => {
+        const now = Date.now();
+        const hasRegisteredGroups = Object.keys(
+          this.opts.registeredGroups(),
+        ).some((jid) => jid.startsWith('signal:group.'));
+        if (!hasRegisteredGroups) return;
 
-      const hoursSinceGroupMsg =
-        (now - this.lastGroupDataMessage) / (1000 * 60 * 60);
-      const hoursSinceRestart =
-        (now - this.lastSignalCliRestart) / (1000 * 60 * 60);
+        const hoursSinceGroupMsg =
+          (now - this.lastGroupDataMessage) / (1000 * 60 * 60);
+        const hoursSinceRestart =
+          (now - this.lastSignalCliRestart) / (1000 * 60 * 60);
 
-      // Restart if no group messages for 2+ hours, or every 8 hours as a safety net
-      if (hoursSinceGroupMsg >= 2 || hoursSinceRestart >= 8) {
-        logger.info(
-          {
-            hoursSinceGroupMsg: hoursSinceGroupMsg.toFixed(1),
-            hoursSinceRestart: hoursSinceRestart.toFixed(1),
-          },
-          'Watchdog: restarting signal-cli to prevent stale group delivery',
-        );
-        this.restartSignalCli();
-      }
-    }, 10 * 60 * 1000);
+        // Restart if no group messages for 2+ hours, or every 8 hours as a safety net
+        if (hoursSinceGroupMsg >= 2 || hoursSinceRestart >= 8) {
+          logger.info(
+            {
+              hoursSinceGroupMsg: hoursSinceGroupMsg.toFixed(1),
+              hoursSinceRestart: hoursSinceRestart.toFixed(1),
+            },
+            'Watchdog: restarting signal-cli to prevent stale group delivery',
+          );
+          this.restartSignalCli();
+        }
+      },
+      10 * 60 * 1000,
+    );
   }
 
   private restartSignalCli(): void {
