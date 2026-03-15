@@ -19,6 +19,10 @@ This skill adds Proton Mail support to NanoClaw via Proton Bridge. Your agent ca
 | **proton-mcp** (`tools/proton-mcp/`) | An MCP server that connects to Bridge and gives your agent email tools |
 | **bridge.json** | A config file with your Bridge-generated IMAP/SMTP credentials (not your Proton password) |
 
+### Requirements
+
+**Proton Bridge requires a paid Proton plan** (Mail Plus, Proton Unlimited, or any paid tier). Free Proton accounts cannot use Bridge. If you don't have a paid plan, you'll need to upgrade at https://proton.me/mail/pricing before proceeding.
+
 ### Why Proton Bridge?
 
 ProtonMail uses a custom authentication protocol (SRP v4) that isn't available as a standard npm package. Instead of reverse-engineering their auth flow, we use **Proton Bridge** — Proton's official, supported way to connect email clients. Bridge handles all the authentication and encryption transparently, and exposes standard IMAP and SMTP interfaces on localhost.
@@ -37,6 +41,10 @@ The directory structure is pre-scaffolded for all three phases.
 ### Check if already applied
 
 Check if `tools/proton-mcp/index.js` exists. If it does, skip to Phase 3 (Setup). The code is already in place.
+
+### Check paid plan
+
+Inform the user: **Proton Bridge requires a paid Proton plan** (Mail Plus or higher). Free accounts cannot use Bridge. If they're on a free plan, they'll need to upgrade before this skill will work.
 
 ### Ask the user
 
