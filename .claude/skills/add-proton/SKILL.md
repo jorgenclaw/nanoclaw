@@ -108,18 +108,56 @@ Bridge generates its own IMAP/SMTP password (different from your Proton account 
 3. Note the **username** (your email) and the **Bridge password** (a generated string)
 4. Note the ports — usually IMAP: `1143`, SMTP: `1025`
 
+### Docker network relay (Linux only)
+
+Proton Bridge only listens on `127.0.0.1` (localhost). NanoClaw agents run inside Docker containers, which are on a separate network and can't reach localhost directly. On Linux, you need `socat` to relay traffic from the Docker bridge to Bridge:
+
+```bash
+sudo apt install -y socat
+```
+
+Create `~/.config/systemd/user/proton-bridge-relay.service`:
+
+```ini
+[Unit]
+Description=Relay Proton Bridge IMAP/SMTP to Docker network
+After=proton-bridge.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c '\
+  socat TCP-LISTEN:1143,bind=172.17.0.1,fork,reuseaddr TCP:127.0.0.1:1143 & \
+  socat TCP-LISTEN:1025,bind=172.17.0.1,fork,reuseaddr TCP:127.0.0.1:1025 & \
+  wait'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable proton-bridge-relay
+systemctl --user start proton-bridge-relay
+```
+
+This creates a relay that forwards connections from the Docker network (`172.17.0.1`) to Bridge on localhost. Without this, containers will get "connection refused" errors when trying to reach Bridge.
+
+> **macOS users:** Docker Desktop on macOS handles this automatically — `host.docker.internal` routes to the host without a relay. You can skip this step.
+
 ### Create config file
 
 ```bash
 mkdir -p ~/.proton-mcp
 ```
 
-Create `~/.proton-mcp/bridge.json`:
+Create `~/.proton-mcp/bridge.json` — use `host.docker.internal` as the host (not `127.0.0.1`) so containers can reach Bridge through the relay:
 ```json
 {
-  "imap_host": "127.0.0.1",
+  "imap_host": "host.docker.internal",
   "imap_port": 1143,
-  "smtp_host": "127.0.0.1",
+  "smtp_host": "host.docker.internal",
   "smtp_port": 1025,
   "username": "your-email@proton.me",
   "password": "<bridge-generated-password>"
@@ -191,6 +229,7 @@ Send these messages to the agent:
 | "Proton Bridge credentials not found" | Missing config file | Create `~/.proton-mcp/bridge.json` per setup instructions |
 | "ETIMEDOUT" | Bridge is running but IMAP port is wrong | Check Bridge settings for actual port numbers |
 | Send fails silently | SMTP port wrong | Verify SMTP port in Bridge (usually 1025) |
+| "Connection refused" from container | Bridge only listens on localhost, not Docker network | Set up the socat relay service (see "Docker network relay" section above) and use `host.docker.internal` in bridge.json |
 
 ## Removal
 
