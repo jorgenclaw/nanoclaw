@@ -1,6 +1,6 @@
 /**
  * IMAP client for Proton Bridge
- * Handles read operations: list, get, search, unread, thread, mark
+ * Handles read operations: list, get, search, unread
  */
 
 import Imap from 'imap';
@@ -70,13 +70,10 @@ function fetchMessages(imap, seqnos, bodiesOpt = '') {
             to: mail.to?.text || '',
             date: mail.date?.toISOString() || '',
             body: mail.text || mail.html || '',
-            message_id_header: mail.messageId || null,
-            in_reply_to: mail.inReplyTo || null,
-            references: mail.references || [],
             seen: true, // will be overridden by caller if needed
           });
         } catch {
-          parsed.push({ id: m.seqno, subject: '(parse error)', from: '', to: '', date: '', body: '', message_id_header: null, in_reply_to: null, references: [], seen: true });
+          parsed.push({ id: m.seqno, subject: '(parse error)', from: '', to: '', date: '', body: '', seen: true });
         }
       }
       resolve(parsed);
@@ -167,64 +164,5 @@ export async function searchMessages(config, query) {
     const recent = uids.slice(-10);
     const messages = await fetchMessages(imap, recent, 'HEADER');
     return messages.map((m) => ({ ...m, body: undefined }));
-  });
-}
-
-export async function getMessageHeaders(config, messageId) {
-  return withImap(config, async (imap) => {
-    await openInbox(imap, true);
-    const messages = await fetchMessages(imap, [messageId], 'HEADER');
-    if (messages.length === 0) throw new Error(`Message ${messageId} not found`);
-    return {
-      messageId: messages[0].message_id_header,
-      subject: messages[0].subject,
-      from: messages[0].from,
-      references: messages[0].references,
-      inReplyTo: messages[0].in_reply_to,
-    };
-  });
-}
-
-export async function getThread(config, messageId) {
-  return withImap(config, async (imap) => {
-    await openInbox(imap, true);
-
-    // 1. Fetch the starting message to get its threading headers
-    const startMsgs = await fetchMessages(imap, [messageId], '');
-    if (startMsgs.length === 0) throw new Error(`Message ${messageId} not found`);
-
-    // 2. Collect all Message-IDs in the thread
-    const refIds = [
-      startMsgs[0].message_id_header,
-      ...(startMsgs[0].references || []),
-      startMsgs[0].in_reply_to,
-    ].filter(Boolean);
-
-    // 3. Search INBOX for each referenced Message-ID
-    const allSeqnos = new Set([messageId]);
-    for (const id of refIds) {
-      const results = await imapSearch(imap, [['HEADER', 'Message-ID', id]]);
-      results.forEach(n => allSeqnos.add(n));
-    }
-
-    // 4. Fetch all matching messages
-    const seqnoArray = [...allSeqnos];
-    const threadMsgs = await fetchMessages(imap, seqnoArray, '');
-
-    // 5. Sort chronologically
-    return threadMsgs.sort((a, b) => new Date(a.date) - new Date(b.date));
-  });
-}
-
-export async function markMessage(config, messageId, read) {
-  return withImap(config, async (imap) => {
-    await openInbox(imap, false); // false = read-write (needed to set flags)
-    await new Promise((resolve, reject) => {
-      const action = read ? '+FLAGS' : '-FLAGS';
-      imap.store(messageId, action, ['\\Seen'], (err) => {
-        if (err) reject(err); else resolve();
-      });
-    });
-    return { success: true, message_id: messageId, read };
   });
 }

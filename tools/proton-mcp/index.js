@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Proton MCP Server — Phase 1.5: Mail (Rich Capabilities)
+ * Proton MCP Server — Phase 1: Mail
  *
  * Connects to Proton Bridge via IMAP/SMTP and exposes mail tools.
  * Bridge handles all authentication, SRP, and PGP decryption transparently.
@@ -12,8 +12,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { getUnread, listMessages, getMessage, searchMessages, getThread, markMessage } from './mail/imap-client.js';
-import { sendMessage, replyMessage } from './mail/smtp-client.js';
+import { getUnread, listMessages, getMessage, searchMessages } from './mail/imap-client.js';
+import { sendMessage } from './mail/smtp-client.js';
 
 // --- Config ---
 
@@ -53,13 +53,14 @@ function loadConfig() {
 
 const server = new McpServer({
   name: 'proton',
-  version: '1.5.0',
+  version: '1.0.0',
 });
 
 let config;
 try {
   config = loadConfig();
 } catch (err) {
+  // Config will be loaded on first tool call if not available at startup
   config = null;
 }
 
@@ -109,7 +110,7 @@ server.tool(
 // --- Tool: get_message ---
 server.tool(
   'mail__get_message',
-  'Get a single email by message ID (sequence number). Includes threading headers.',
+  'Get a single email by message ID (sequence number)',
   {
     message_id: z.number().describe('Message sequence number from list_messages'),
   },
@@ -143,88 +144,15 @@ server.tool(
 // --- Tool: send_message ---
 server.tool(
   'mail__send_message',
-  'Send an email via Proton Mail. Supports CC, BCC, and file attachments.',
+  'Send an email via Proton Mail',
   {
     to: z.string().describe('Recipient email address'),
     subject: z.string().describe('Email subject'),
     body: z.string().describe('Email body (plain text)'),
-    cc: z.string().optional().describe('CC recipient(s), comma-separated'),
-    bcc: z.string().optional().describe('BCC recipient(s), comma-separated'),
-    attachments: z.array(z.object({
-      filename: z.string(),
-      path: z.string().optional().describe('Absolute path to file on disk'),
-      content: z.string().optional().describe('File content as base64 string'),
-      contentType: z.string().optional().describe('MIME type (optional, inferred from filename)'),
-    })).optional().describe('Files to attach'),
   },
   async (args) => {
     try {
       const result = await sendMessage(getConfig(), args);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    } catch (err) {
-      return errorResult(err.message);
-    }
-  },
-);
-
-// --- Tool: reply_message ---
-server.tool(
-  'mail__reply_message',
-  'Reply to an email, preserving the thread (In-Reply-To + References headers)',
-  {
-    message_id: z.number().describe('Sequence number of the message to reply to'),
-    body: z.string().describe('Reply body (plain text)'),
-    cc: z.string().optional().describe('CC recipient(s), comma-separated'),
-    attachments: z.array(z.object({
-      filename: z.string(),
-      path: z.string().optional(),
-      content: z.string().optional(),
-      contentType: z.string().optional(),
-    })).optional().describe('Files to attach'),
-  },
-  async (args) => {
-    try {
-      const result = await replyMessage(getConfig(), {
-        originalMessageId: args.message_id,
-        body: args.body,
-        cc: args.cc,
-        attachments: args.attachments,
-      });
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    } catch (err) {
-      return errorResult(err.message);
-    }
-  },
-);
-
-// --- Tool: get_thread ---
-server.tool(
-  'mail__get_thread',
-  'Fetch the full email chain (thread) for a message',
-  {
-    message_id: z.number().describe('Sequence number of any message in the thread'),
-  },
-  async (args) => {
-    try {
-      const result = await getThread(getConfig(), args.message_id);
-      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    } catch (err) {
-      return errorResult(err.message);
-    }
-  },
-);
-
-// --- Tool: mark_message ---
-server.tool(
-  'mail__mark_message',
-  'Mark an email as read or unread',
-  {
-    message_id: z.number().describe('Message sequence number'),
-    read: z.boolean().describe('true = mark as read, false = mark as unread'),
-  },
-  async (args) => {
-    try {
-      const result = await markMessage(getConfig(), args.message_id, args.read);
       return { content: [{ type: 'text', text: JSON.stringify(result) }] };
     } catch (err) {
       return errorResult(err.message);
