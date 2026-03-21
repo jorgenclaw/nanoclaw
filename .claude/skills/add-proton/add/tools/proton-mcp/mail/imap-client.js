@@ -68,6 +68,7 @@ function fetchMessages(imap, seqnos, bodiesOpt = '') {
             subject: mail.subject || '(no subject)',
             from: mail.from?.text || 'unknown',
             to: mail.to?.text || '',
+            cc: mail.cc?.text || '',
             date: mail.date?.toISOString() || '',
             body: mail.text || mail.html || '',
             message_id_header: mail.messageId || null,
@@ -179,6 +180,8 @@ export async function getMessageHeaders(config, messageId) {
       messageId: messages[0].message_id_header,
       subject: messages[0].subject,
       from: messages[0].from,
+      to: messages[0].to,
+      cc: messages[0].cc || null,
       references: messages[0].references,
       inReplyTo: messages[0].in_reply_to,
     };
@@ -218,7 +221,7 @@ export async function getThread(config, messageId) {
 
 export async function markMessage(config, messageId, read) {
   return withImap(config, async (imap) => {
-    await openInbox(imap, false); // false = read-write (needed to set flags)
+    await openInbox(imap, false);
     await new Promise((resolve, reject) => {
       const action = read ? '+FLAGS' : '-FLAGS';
       imap.store(messageId, action, ['\\Seen'], (err) => {
@@ -226,5 +229,127 @@ export async function markMessage(config, messageId, read) {
       });
     });
     return { success: true, message_id: messageId, read };
+  });
+}
+
+export async function starMessage(config, messageId, star) {
+  return withImap(config, async (imap) => {
+    await openInbox(imap, false);
+    await new Promise((resolve, reject) => {
+      const action = star ? '+FLAGS' : '-FLAGS';
+      imap.store(messageId, action, ['\\Flagged'], (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+    return { success: true, message_id: messageId, starred: star };
+  });
+}
+
+export async function deleteMessage(config, messageId) {
+  return withImap(config, async (imap) => {
+    await openInbox(imap, false);
+    await new Promise((resolve, reject) => {
+      imap.store(messageId, '+FLAGS', ['\\Deleted'], (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+    await new Promise((resolve, reject) => {
+      imap.expunge((err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+    return { success: true, message_id: messageId, deleted: true };
+  });
+}
+
+export async function moveMessage(config, messageId, destFolder) {
+  return withImap(config, async (imap) => {
+    await openInbox(imap, false);
+    await new Promise((resolve, reject) => {
+      imap.move(messageId, destFolder, (err) => {
+        if (err) reject(err); else resolve();
+      });
+    });
+    return { success: true, message_id: messageId, moved_to: destFolder };
+  });
+}
+
+export async function listFolders(config) {
+  return withImap(config, async (imap) => {
+    return new Promise((resolve, reject) => {
+      imap.getBoxes((err, boxes) => {
+        if (err) reject(err);
+        else {
+          const folders = [];
+          function walk(obj, prefix = '') {
+            for (const [name, box] of Object.entries(obj)) {
+              const fullName = prefix ? `${prefix}${box.delimiter}${name}` : name;
+              folders.push({ name: fullName, delimiter: box.delimiter });
+              if (box.children) walk(box.children, fullName);
+            }
+          }
+          walk(boxes);
+          resolve(folders);
+        }
+      });
+    });
+  });
+}
+
+function openBox(imap, folder, readOnly = true) {
+  return new Promise((resolve, reject) => {
+    imap.openBox(folder, readOnly, (err, box) => {
+      if (err) reject(err);
+      else resolve(box);
+    });
+  });
+}
+
+export async function listMessagesInFolder(config, folder, limit = 10) {
+  return withImap(config, async (imap) => {
+    const box = await openBox(imap, folder, true);
+    const total = box.messages.total;
+    if (total === 0) return [];
+
+    const start = Math.max(1, total - limit + 1);
+    const range = `${start}:${total}`;
+
+    const messages = await fetchMessages(imap, range, 'HEADER');
+    return messages
+      .map((m) => ({ ...m, body: undefined }))
+      .reverse();
+  });
+}
+
+export async function getAttachments(config, messageId) {
+  return withImap(config, async (imap) => {
+    await openInbox(imap, true);
+
+    return new Promise((resolve, reject) => {
+      const f = imap.fetch([messageId], { bodies: '', struct: true });
+      let raw = '';
+
+      f.on('message', (msg) => {
+        msg.on('body', (stream) => {
+          stream.on('data', (chunk) => { raw += chunk.toString('utf8'); });
+        });
+      });
+
+      f.once('error', reject);
+      f.once('end', async () => {
+        try {
+          const mail = await simpleParser(raw);
+          const attachments = (mail.attachments || []).map((a) => ({
+            filename: a.filename,
+            contentType: a.contentType,
+            size: a.size,
+            content: a.content.toString('base64'),
+          }));
+          resolve(attachments);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
   });
 }

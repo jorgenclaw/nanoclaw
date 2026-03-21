@@ -1,13 +1,13 @@
 ---
 name: add-proton
-description: "Add Proton suite integration to NanoClaw. Phase 1: Mail via Proton Bridge (IMAP/SMTP). Phases 2-3: Drive and Pass in follow-up PRs. Can be configured as a tool (agent reads/sends emails on demand) or as a full channel (incoming emails trigger agent runs)."
+description: "Add Proton suite integration to NanoClaw. 36 MCP tools across Mail (via Bridge), Pass (via pass-cli), Drive (via rclone), Calendar (via Radicale CalDAV), and VPN status. Full credential management with TOTP, encrypted backup, and calendar scheduling."
 ---
 
 *Synthesized by Jorgenclaw (AI agent) and Claude Code (host AI), with direct feedback and verification from Scott Jorgensen*
 
 # Add Proton Suite Integration
 
-This skill adds Proton Mail support to NanoClaw via Proton Bridge. Your agent can read, search, and send emails through your Proton account — all encrypted end-to-end by Bridge.
+This skill adds the full Proton suite to NanoClaw — 36 MCP tools across five products. Your agent can read/send email, manage passwords with 2FA, back up files to encrypted cloud storage, schedule calendar events, and check VPN status.
 
 > **Feeling stuck?** Don't be afraid to ask Claude directly where you are in the process and what to do next.
 
@@ -15,56 +15,49 @@ This skill adds Proton Mail support to NanoClaw via Proton Bridge. Your agent ca
 
 | Component | What it does |
 |-----------|-------------|
-| **Proton Bridge** | Proton's official app that decrypts your email locally and exposes standard IMAP/SMTP on localhost |
-| **proton-mcp** (`tools/proton-mcp/`) | An MCP server that connects to Bridge and gives your agent email tools |
-| **bridge.json** | A config file with your Bridge-generated IMAP/SMTP credentials (not your Proton password) |
+| **Proton Bridge** | Proton's official app that decrypts email locally, exposes IMAP/SMTP on localhost |
+| **pass-cli** | Proton's official CLI for Pass — credential vault, TOTP generation, password creation |
+| **rclone** | Open-source tool with official Proton Drive backend — upload, download, sync files |
+| **Radicale** | Lightweight CalDAV server — calendar events that sync to your phone |
+| **proton-mcp** (`tools/proton-mcp/`) | MCP server that wraps all of the above into agent tools |
 
 ### Requirements
 
-**Proton Bridge requires a paid Proton plan** (Mail Plus, Proton Unlimited, or any paid tier). Free Proton accounts cannot use Bridge. If you don't have a paid plan, you'll need to upgrade at https://proton.me/mail/pricing before proceeding.
+- **Paid Proton plan** (Mail Plus, Pass Plus, or Proton Unlimited) — required for Bridge and pass-cli
+- **Docker** — agents run in containers
+- **Node.js 18+**
 
-### Why Proton Bridge?
-
-ProtonMail uses a custom authentication protocol (SRP v4) that isn't available as a standard npm package. Instead of reverse-engineering their auth flow, we use **Proton Bridge** — Proton's official, supported way to connect email clients. Bridge handles all the authentication and encryption transparently, and exposes standard IMAP and SMTP interfaces on localhost.
-
-### Suite Architecture
-
-This skill is designed to grow:
-- **Phase 1 (this PR):** Mail — read, search, send via Bridge
-- **Phase 2 (follow-up):** Drive — file upload, download, share
-- **Phase 3 (follow-up):** Pass — credential lookup
-
-The directory structure is pre-scaffolded for all three phases.
-
-## Phase 1: Pre-flight
+## Pre-flight
 
 ### Check if already applied
 
-Check if `tools/proton-mcp/index.js` exists. If it does, skip to Phase 3 (Setup). The code is already in place.
-
-### Check paid plan
-
-Inform the user: **Proton Bridge requires a paid Proton plan** (Mail Plus or higher). Free accounts cannot use Bridge. If they're on a free plan, they'll need to upgrade before this skill will work.
+Check if `tools/proton-mcp/index.js` exists. If it does, skip to Setup. The code is already in place.
 
 ### Ask the user
 
 Use `AskUserQuestion`:
 
-AskUserQuestion: Should incoming emails be able to trigger the agent?
+Which Proton products do you want to set up? (You can add more later)
 
-- **No (Recommended)** — Tool-only: the agent gets full Proton Mail tools (read, send, search) but won't monitor the inbox. Minimal changes.
-- **Yes** — Channel mode: the agent polls the inbox and responds to incoming emails automatically. (Note: Channel mode is coming in a follow-up PR. For now, tool-only mode is available.)
+- **Mail** — Read, send, search, forward, manage emails
+- **Pass** — Credential vault with TOTP for autonomous 2FA
+- **Drive** — Encrypted cloud backup for agent memory and files
+- **Calendar** — Schedule events, reminders, follow-ups (syncs to phone)
+- **VPN** — Check connection status
+- **All of the above** (recommended)
 
-## Phase 2: Apply Code Changes
+## Apply Code Changes
 
 ### Add Proton MCP server files
 
 Copy `tools/proton-mcp/` into the project root. This includes:
-- `index.js` — MCP server with 5 mail tools
-- `mail/imap-client.js` — IMAP read/search operations
-- `mail/smtp-client.js` — SMTP send via nodemailer
-- `drive/README.md` — Phase 2 stub
-- `pass/README.md` — Phase 3 stub
+- `index.js` — MCP server with 36 tools
+- `mail/imap-client.js` — IMAP operations (read, search, folders, attachments, star, delete, move)
+- `mail/smtp-client.js` — SMTP operations (send, reply, reply-all, forward, HTML)
+- `pass/pass-client.js` — Pass CLI wrapper (vault CRUD, TOTP, password generation)
+- `drive/drive-client.js` — rclone wrapper (upload, download, list, delete)
+- `calendar/calendar-client.js` — CalDAV client (create, list, update, delete events)
+- `vpn/vpn-client.js` — VPN status via external IP lookup
 
 ### Install dependencies
 
@@ -72,13 +65,23 @@ Copy `tools/proton-mcp/` into the project root. This includes:
 cd tools/proton-mcp && npm install && cd ../..
 ```
 
-### Mount Proton credentials in container
+### Mount credentials in container
 
-Apply the changes described in `modify/src/container-runner.ts.intent.md` to `src/container-runner.ts`: add a conditional read-write mount of `~/.proton-mcp` to `/home/node/.proton-mcp` in `buildVolumeMounts()` after the session mounts. Only mount if the directory exists.
+Apply the changes described in `modify/src/container-runner.ts.intent.md` to `src/container-runner.ts`:
+- Mount `~/.proton-mcp` (Bridge credentials) for all groups
+- Mount `pass-cli` binary and `~/.local/share/proton-pass-cli/` session data — **main group only**
+- Mount `rclone` binary and `~/.config/rclone/` config — **main group only**
+- Set `PROTON_PASS_KEY_PROVIDER=fs` env var in containers
 
 ### Add Proton MCP server to agent runner
 
 Apply the changes described in `modify/container/agent-runner/src/index.ts.intent.md` to `container/agent-runner/src/index.ts`: add `proton` MCP server and `'mcp__proton__*'` to `allowedTools`.
+
+### Add config exports
+
+Apply the changes described in `modify/src/config.ts.intent.md` to `src/config.ts`:
+- `PROTON_PASS_BIN` — path to pass-cli binary
+- `PROTON_PASS_VAULT` — default vault name (NanoClaw)
 
 ### Validate
 
@@ -88,29 +91,24 @@ npm run build
 
 Build must be clean before proceeding.
 
-## Phase 3: Setup
+## Setup: Mail (Proton Bridge)
 
 ### Install Proton Bridge
 
 1. Download from https://proton.me/mail/bridge
-2. Install the package:
-   - **Ubuntu/Pop!_OS:** `sudo dpkg -i protonmail-bridge*.deb`
-   - **macOS:** Drag to Applications
-3. Launch Bridge and sign in with your Proton account (one time, in the GUI)
-4. In Bridge settings, verify IMAP and SMTP are enabled
+2. Install: `sudo dpkg -i protonmail-bridge*.deb` (Ubuntu/Pop!_OS) or drag to Applications (macOS)
+3. Launch Bridge and sign in with your Proton account
+4. Verify IMAP and SMTP are enabled in Bridge settings
 
 ### Get Bridge credentials
 
-Bridge generates its own IMAP/SMTP password (different from your Proton account password):
-
 1. In Bridge, click your account name
-2. Look for "IMAP/SMTP" section
-3. Note the **username** (your email) and the **Bridge password** (a generated string)
-4. Note the ports — usually IMAP: `1143`, SMTP: `1025`
+2. Note the **username** (your email) and the **Bridge password** (a generated string)
+3. Note the ports — usually IMAP: `1143`, SMTP: `1025`
 
 ### Docker network relay (Linux only)
 
-Proton Bridge only listens on `127.0.0.1` (localhost). NanoClaw agents run inside Docker containers, which are on a separate network and can't reach localhost directly. On Linux, you need `socat` to relay traffic from the Docker bridge to Bridge:
+Proton Bridge only listens on localhost. Containers can't reach it directly. Set up a relay:
 
 ```bash
 sudo apt install -y socat
@@ -138,22 +136,16 @@ WantedBy=default.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable proton-bridge-relay
-systemctl --user start proton-bridge-relay
+systemctl --user enable --now proton-bridge-relay
 ```
 
-This creates a relay that forwards connections from the Docker network (`172.17.0.1`) to Bridge on localhost. Without this, containers will get "connection refused" errors when trying to reach Bridge.
-
-> **macOS users:** Docker Desktop on macOS handles this automatically — `host.docker.internal` routes to the host without a relay. You can skip this step.
+> **macOS:** Docker Desktop handles this automatically via `host.docker.internal`. Skip this step.
 
 ### Create config file
 
 ```bash
 mkdir -p ~/.proton-mcp
-```
-
-Create `~/.proton-mcp/bridge.json` — use `host.docker.internal` as the host (not `127.0.0.1`) so containers can reach Bridge through the relay:
-```json
+cat > ~/.proton-mcp/bridge.json << 'EOF'
 {
   "imap_host": "host.docker.internal",
   "imap_port": 1143,
@@ -162,20 +154,127 @@ Create `~/.proton-mcp/bridge.json` — use `host.docker.internal` as the host (n
   "username": "your-email@proton.me",
   "password": "<bridge-generated-password>"
 }
+EOF
 ```
 
-### Set up Bridge as a service (Linux)
+## Setup: Pass (pass-cli)
 
-Create `~/.config/systemd/user/proton-bridge.service`:
+### Install pass-cli
+
+```bash
+curl -fsSL https://proton.me/download/pass-cli/install.sh | bash
+```
+
+### Login and configure
+
+```bash
+PROTON_PASS_KEY_PROVIDER=fs pass-cli login
+pass-cli settings set default-vault --vault-name NanoClaw
+```
+
+Use the **filesystem key provider** (`fs`) so the session survives reboots and works inside Docker containers.
+
+### Create a vault
+
+```bash
+PROTON_PASS_KEY_PROVIDER=fs pass-cli vault create --name NanoClaw
+```
+
+## Setup: Drive (rclone)
+
+### Install rclone
+
+```bash
+curl -fsSL https://rclone.org/install.sh | sudo bash
+```
+
+The apt version is too old — use the install script to get rclone 1.62+ which includes the `protondrive` backend.
+
+### Configure
+
+```bash
+rclone config
+```
+
+Create a new remote named `protondrive`, select the `protondrive` type, enter your Proton credentials.
+
+### Test
+
+```bash
+rclone lsd protondrive:
+```
+
+## Setup: Calendar (Radicale)
+
+### Install Radicale
+
+```bash
+sudo apt install -y radicale
+```
+
+### Configure
+
+Create `~/.config/radicale/config`:
+
+```ini
+[server]
+hosts = 127.0.0.1:5232
+
+[auth]
+type = htpasswd
+htpasswd_filename = ~/.config/radicale/users
+htpasswd_encryption = plain
+
+[storage]
+filesystem_folder = ~/.var/lib/radicale/collections
+
+[rights]
+type = from_file
+file = ~/.config/radicale/rights
+```
+
+Create `~/.config/radicale/users`:
+```
+jorgenclaw:nanoclaw-cal
+yourusername:your-cal-password
+```
+
+Create `~/.config/radicale/rights`:
+```ini
+[owner]
+user = .+
+collection = {user}/.*
+permissions = RrWw
+
+[user-reads-agent]
+user = yourusername
+collection = jorgenclaw/.*
+permissions = RrWw
+
+[agent-reads-user]
+user = jorgenclaw
+collection = yourusername/.*
+permissions = Rr
+
+[root-access]
+user = .+
+collection = {user}
+permissions = RrWw
+```
+
+### Create systemd service
+
+Create `~/.config/systemd/user/radicale.service`:
 
 ```ini
 [Unit]
-Description=Proton Bridge
+Description=Radicale CalDAV Server
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/proton-bridge --noninteractive
+ExecStart=/usr/bin/radicale --config ~/.config/radicale/config
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target
@@ -183,59 +282,79 @@ WantedBy=default.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable proton-bridge
-systemctl --user start proton-bridge
+systemctl --user enable --now radicale
 ```
 
-### Rebuild and restart NanoClaw
+### Create calendars
+
+```bash
+curl -u jorgenclaw:nanoclaw-cal -X MKCALENDAR http://127.0.0.1:5232/jorgenclaw/calendar/
+curl -u yourusername:your-cal-password -X MKCALENDAR http://127.0.0.1:5232/yourusername/calendar/
+```
+
+### Subscribe from phone (optional)
+
+Expose Radicale via Tailscale, then:
+- **iOS:** Settings > Calendar > Accounts > Add CalDAV Account
+- **Android:** Install DAVx5, add CalDAV account
+- Server: `http://<tailscale-ip>:5232`
+
+## Rebuild and restart
 
 ```bash
 npm run build
 ./container/build.sh
-systemctl --user restart nanoclaw   # Linux
-# macOS: launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+systemctl --user restart nanoclaw
 ```
 
-## Phase 4: Verify
-
-### Check Bridge is running
-
-```bash
-nc -z 127.0.0.1 1143 && echo "IMAP reachable" || echo "Bridge not running"
-```
+## Verify
 
 ### Test from chat
 
-Send these messages to the agent:
-1. "Check my email" — should use `mcp__proton__mail__get_unread`
-2. "Send an email to test@example.com with subject 'Test' and body 'Hello'" — should use `mcp__proton__mail__send_message`
+| What to say | Expected tool |
+|---|---|
+| "Check my email" | `mail__get_unread` |
+| "Send an email to test@example.com" | `mail__send_message` |
+| "What's my GitHub password?" | `pass__get_item` |
+| "Generate a TOTP code for GitHub" | `pass__get_totp` |
+| "List my Drive files" | `drive__list` |
+| "What's on my calendar this week?" | `calendar__list_events` |
+| "Am I on VPN?" | `vpn__status` |
 
-### Available tools
+### All 36 tools
 
-| Tool | What it does |
-|------|-------------|
-| `mcp__proton__mail__get_unread` | Get unread email count and subjects |
-| `mcp__proton__mail__list_messages` | List recent emails with metadata |
-| `mcp__proton__mail__get_message` | Read a full email by ID |
-| `mcp__proton__mail__search_messages` | Search emails by keyword |
-| `mcp__proton__mail__send_message` | Send an email |
+| Category | Tools |
+|---|---|
+| **Mail** (15) | get_unread, list_messages, get_message, search_messages, send_message, reply_message, forward_message, get_thread, mark_message, star_message, delete_message, move_message, list_folders, list_folder_messages, get_attachments |
+| **Pass** (9) | list_vaults, list_items, search_items, get_item, create_item, update_item, trash_item, generate_password, get_totp |
+| **Drive** (6) | list, upload, upload_folder, download, delete, mkdir |
+| **Calendar** (5) | list_events, get_event, create_event, update_event, delete_event |
+| **VPN** (1) | status |
 
-## Phase 5: Troubleshooting
+## Troubleshooting
 
 | Problem | What it means | What to do |
 |---------|--------------|------------|
 | "IMAP connection failed" | Bridge isn't running or wrong port | `systemctl --user start proton-bridge` and verify `nc -z 127.0.0.1 1143` |
 | "Authentication failed" | Wrong credentials in bridge.json | Get fresh Bridge password from Bridge GUI settings |
 | "Proton Bridge credentials not found" | Missing config file | Create `~/.proton-mcp/bridge.json` per setup instructions |
-| "ETIMEDOUT" | Bridge is running but IMAP port is wrong | Check Bridge settings for actual port numbers |
-| Send fails silently | SMTP port wrong | Verify SMTP port in Bridge (usually 1025) |
-| "Connection refused" from container | Bridge only listens on localhost, not Docker network | Set up the socat relay service (see "Docker network relay" section above) and use `host.docker.internal` in bridge.json |
+| "Connection refused" from container | Bridge only listens on localhost | Set up the socat relay service (Linux) or use `host.docker.internal` (macOS) |
+| pass-cli "Passphrases file not found" | Key provider issue after reboot | Run `PROTON_PASS_KEY_PROVIDER=fs pass-cli login` |
+| rclone "unusual activity" | Proton flagged the login | Wait 15-30 min, or contact https://proton.me/support/appeal-abuse |
+| Calendar "400 Bad Request" | ICS formatting issue | Check Radicale logs: `journalctl --user -u radicale` |
+
+## Security Notes
+
+- **Pass and Drive tools are main-group only** — non-main groups cannot access credentials or cloud files (enforced by container mount isolation, not just policy)
+- `pass-cli` uses the **filesystem key provider** — the encryption key is stored on disk, not in the kernel keyring. This is necessary for Docker container access and reboot survival
+- `list_items` and `search_items` **never expose passwords** — only `get_item` returns credentials
+- TOTP seeds are as sensitive as passwords — never logged in error messages
 
 ## Removal
 
 1. Remove `tools/proton-mcp/`
-2. Revert container-runner.ts changes (remove `~/.proton-mcp` mount)
-3. Revert agent-runner index.ts changes (remove proton MCP server and `mcp__proton__*` from allowedTools)
-4. Remove `~/.proton-mcp/` from host
+2. Revert container-runner.ts changes (remove proton-mcp, pass-cli, rclone mounts)
+3. Revert agent-runner index.ts changes (remove proton MCP server)
+4. Remove config files: `~/.proton-mcp/`, `~/.config/radicale/`, `~/.config/rclone/`
 5. Rebuild: `npm run build && ./container/build.sh`
-6. Optionally stop Bridge: `systemctl --user stop proton-bridge && systemctl --user disable proton-bridge`
+6. Optionally stop services: `systemctl --user stop proton-bridge radicale`
