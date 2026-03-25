@@ -5,7 +5,11 @@ import { registerChannel } from './registry.js';
 import { SignalChannel } from './signal.js';
 import { WhiteNoiseChannel } from './whitenoise.js';
 import { NostrDMChannel } from './nostr-dm.js';
-import { SIGNAL_PHONE_NUMBER, WN_ACCOUNT_PUBKEY, NOSTR_DM_ALLOWLIST } from '../config.js';
+import {
+  SIGNAL_PHONE_NUMBER,
+  WN_ACCOUNT_PUBKEY,
+  NOSTR_DM_ALLOWLIST,
+} from '../config.js';
 
 registerChannel('signal', (opts) => {
   if (!SIGNAL_PHONE_NUMBER) return null;

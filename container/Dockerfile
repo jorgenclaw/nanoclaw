@@ -35,6 +35,11 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
+# WeasyPrint for PDF generation (HTML→PDF via CSS, no LaTeX needed)
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip && \
+    pip3 install --break-system-packages weasyprint && \
+    apt-get purge -y python3-pip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 # Install agent-browser, claude-code, and bitwarden CLI globally
 RUN npm install -g agent-browser @anthropic-ai/claude-code @bitwarden/cli md-to-epub
 

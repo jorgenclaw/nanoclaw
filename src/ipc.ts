@@ -9,7 +9,7 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { IpcMedia, RegisteredGroup } from './types.js';
 
 /**
  * Map a container file path back to the host filesystem.
@@ -59,7 +59,7 @@ function resolveContainerPath(
 }
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, media?: IpcMedia) => Promise<void>;
   sendReaction: (
     jid: string,
     messageId: string,
@@ -129,16 +129,34 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (data.type === 'message' && data.chatJid && (data.text || data.filePath)) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  // Build media object if a file path is provided
+                  // Translate container path to host path: /workspace/group/<rel> → {GROUPS_DIR}/{sourceGroup}/<rel>
+                  let media: IpcMedia | undefined;
+                  const CONTAINER_GROUP_PREFIX = '/workspace/group/';
+                  if (data.filePath && typeof data.filePath === 'string' && data.filePath.startsWith(CONTAINER_GROUP_PREFIX)) {
+                    const relativePath = data.filePath.slice(CONTAINER_GROUP_PREFIX.length);
+                    const hostPath = path.resolve(GROUPS_DIR, sourceGroup, relativePath);
+                    if (hostPath.startsWith(path.resolve(GROUPS_DIR, sourceGroup) + path.sep)) {
+                      media = {
+                        filePath: hostPath,
+                        fileName: data.fileName || undefined,
+                        caption: data.caption || undefined,
+                      };
+                    } else {
+                      logger.warn({ filePath: data.filePath, sourceGroup }, 'IPC media path traversal attempt blocked');
+                    }
+                  }
+
+                  await deps.sendMessage(data.chatJid, data.text || '', media);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, hasMedia: !!media },
                     'IPC message sent',
                   );
                 } else {

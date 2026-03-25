@@ -182,3 +182,11 @@ export const WHISPER_MODEL =
     'models',
     'ggml-base.en.bin',
   );
+
+// Security policy: stored OUTSIDE project root, never mounted into containers
+export const SECURITY_POLICY_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'security-policy.json',
+);
