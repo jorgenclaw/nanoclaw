@@ -16,7 +16,7 @@
 import { connect } from 'net';
 
 const SOCKET_PATH = process.env.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
-const DEFAULT_RELAYS = (process.env.NOSTR_RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.snort.social').split(',');
+const DEFAULT_RELAYS = (process.env.NOSTR_RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net,wss://relay.nostr.band,wss://purplepag.es').split(',');
 
 // --- Socket helpers ---
 

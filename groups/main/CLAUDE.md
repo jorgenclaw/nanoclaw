@@ -202,6 +202,8 @@ You have your own identity separate from Scott's personal accounts.
 | `scott@jorgenclaw.ai` | Scott's domain address (forward incoming, alert Scott, never auto-reply) | Yes — draft + approval before sending |
 | `jorgenclaw@proton.me` | ROOT Proton account — NEVER send from | N/A |
 
+**Forward/alert destination for incoming mail to scott@jorgenclaw.ai and hello@jorgenclaw.ai:** `bccjorgenclaw@proton.me`
+
 **Every outgoing message from `jorgenclaw@jorgenclaw.ai` must open with:** "This message was drafted and sent autonomously by Scott's AI agent. Scott will be informed — reach out to him directly at scott@jorgenclaw.ai if needed."
 
 **For service signups:** Generate a Hide My Email alias via `pass-cli item alias create --prefix <service-name>`

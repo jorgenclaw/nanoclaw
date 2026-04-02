@@ -7,16 +7,37 @@
  * on request via a Unix socket.
  *
  * The agent can USE the key without ever SEEING the key.
+ *
+ * Security layers:
+ * - Session tokens with TTL and event-kind scope
+ * - Per-session rate limiting
+ * - Legacy mode (no token) supported with deprecation warning
  */
 
 import { execSync } from 'child_process';
 import { createServer } from 'net';
-import { existsSync, unlinkSync } from 'fs';
+import { existsSync, unlinkSync, appendFileSync, mkdirSync } from 'fs';
+import { dirname } from 'path';
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
 import { decode as decodeNsec } from 'nostr-tools/nip19';
 import { unwrapEvent as nip17Unwrap, wrapManyEvents as nip17WrapMany } from 'nostr-tools/nip17';
 import * as nip44 from 'nostr-tools/nip44';
 import * as nip04 from 'nostr-tools/nip04';
+import { createSession, validateSession, revokeSession, getSessionInfo } from './sessions.js';
+import { checkRate, clearRate, getRateStats } from './rate-limiter.js';
+
+// --- Alert log ---
+const ALERT_LOG = process.env.SIGNER_ALERT_LOG
+  || `${process.env.HOME || '/tmp'}/NanoClaw/groups/main/status/signer-alerts.log`;
+
+function logAlert(msg) {
+  try {
+    const dir = dirname(ALERT_LOG);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    appendFileSync(ALERT_LOG, `${new Date().toISOString()} ${msg}\n`);
+  } catch { /* best effort */ }
+  console.warn(`[nostr-signer] ALERT: ${msg}`);
+}
 
 // --- Load key from kernel keyring ---
 let secretKeyHex;
@@ -36,6 +57,9 @@ try {
 const pubkey = getPublicKey(secretKeyHex);
 console.log(`[nostr-signer] Public key: ${pubkey}`);
 
+// Track legacy (no-token) usage to log deprecation
+let legacyWarningLogged = false;
+
 // --- Socket path ---
 const SOCKET_PATH = process.env.NOSTR_SIGNER_SOCKET
   || `${process.env.XDG_RUNTIME_DIR || '/run/user/1000'}/nostr-signer.sock`;
@@ -52,10 +76,58 @@ async function handleRequest(data) {
       return JSON.stringify({ pubkey });
     }
 
+    // --- Session management ---
+    if (req.method === 'session_start') {
+      const p = req.params || {};
+      const scope = (p.scope || '1,9734,1111').split(',').map(Number);
+      const ttl = parseInt(p.ttl || '28800', 10);
+      const session = createSession(scope, ttl, p.pid || null);
+      return JSON.stringify({ session });
+    }
+
+    if (req.method === 'session_revoke') {
+      const p = req.params || {};
+      if (!p.token) return JSON.stringify({ error: 'Missing required field: token' });
+      const revoked = revokeSession(p.token);
+      clearRate(p.token);
+      return JSON.stringify({ revoked });
+    }
+
+    if (req.method === 'session_info') {
+      const p = req.params || {};
+      if (!p.token) return JSON.stringify({ error: 'Missing required field: token' });
+      const info = getSessionInfo(p.token);
+      const rateStats = getRateStats(p.token);
+      return JSON.stringify({ session: info, rateStats });
+    }
+
+    // --- sign_event (with optional session token) ---
     if (req.method === 'sign_event') {
       const p = req.params || {};
       if (p.kind === undefined) return JSON.stringify({ error: 'Missing required field: kind' });
       if (p.content === undefined) return JSON.stringify({ error: 'Missing required field: content' });
+
+      // Session validation (if token provided)
+      if (p.session_token) {
+        const sv = validateSession(p.session_token, p.kind);
+        if (!sv.valid) {
+          logAlert(`sign_event rejected: ${sv.error} (kind=${p.kind}, token=${p.session_token.slice(0, 12)}...)`);
+          return JSON.stringify({ error: sv.error });
+        }
+
+        // Rate limiting
+        const rl = checkRate(p.session_token);
+        if (!rl.allowed) {
+          logAlert(`sign_event rate-limited: ${rl.error} (token=${p.session_token.slice(0, 12)}...)`);
+          return JSON.stringify({ error: rl.error });
+        }
+      } else {
+        // Legacy mode — no session token
+        if (!legacyWarningLogged) {
+          console.warn('[nostr-signer] DEPRECATION: sign_event called without session_token. Use session_start to create a scoped session.');
+          legacyWarningLogged = true;
+        }
+      }
 
       const eventTemplate = {
         kind: p.kind,
@@ -176,6 +248,9 @@ server.listen(SOCKET_PATH, () => {
   // Set socket permissions to owner-only
   execSync(`chmod 600 ${SOCKET_PATH}`);
   console.log(`[nostr-signer] Listening on ${SOCKET_PATH}`);
+  console.log(`[nostr-signer] Session management: enabled`);
+  console.log(`[nostr-signer] Rate limiting: enabled (10/min, 100/hr)`);
+  console.log(`[nostr-signer] Legacy mode: allowed (with deprecation warning)`);
 });
 
 // --- Graceful shutdown ---

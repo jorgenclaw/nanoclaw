@@ -272,6 +272,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   schedulerRunning = true;
   logger.info('Scheduler loop started');
 
+  // Clean up orphaned once tasks: active with null next_run = was mid-execution during crash
+  const allTasks = getAllTasks();
+  for (const task of allTasks) {
+    if (
+      task.schedule_type === 'once' &&
+      task.status === 'active' &&
+      !task.next_run
+    ) {
+      updateTaskAfterRun(task.id, null, 'Cleaned up: orphaned after crash');
+      logger.info({ taskId: task.id }, 'Cleaned up orphaned once task');
+    }
+  }
+
   const loop = async () => {
     try {
       const dueTasks = getDueTasks();

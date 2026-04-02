@@ -10,10 +10,19 @@ const CAL_HOST = process.env.CALDAV_HOST || '127.0.0.1';
 const CAL_PORT = parseInt(process.env.CALDAV_PORT || '5232', 10);
 const CAL_USER = process.env.CALDAV_USER || 'jorgenclaw';
 const CAL_PASS = process.env.CALDAV_PASS || 'nanoclaw-cal';
+const CAL_PASS_SCOTT = process.env.CALDAV_PASS_SCOTT || 'scottcal';
 
-const AUTH = Buffer.from(`${CAL_USER}:${CAL_PASS}`).toString('base64');
+const USERS = {
+  jorgenclaw: { user: CAL_USER, pass: CAL_PASS },
+  scott: { user: 'scott', pass: CAL_PASS_SCOTT },
+};
 
-function request(method, path, body = null, contentType = 'application/xml') {
+function getAuth(calendarUser) {
+  const creds = USERS[calendarUser] || USERS[CAL_USER] || { user: CAL_USER, pass: CAL_PASS };
+  return Buffer.from(`${creds.user}:${creds.pass}`).toString('base64');
+}
+
+function request(method, path, body = null, contentType = 'application/xml', calendarUser = CAL_USER) {
   return new Promise((resolve, reject) => {
     const opts = {
       hostname: CAL_HOST,
@@ -21,7 +30,7 @@ function request(method, path, body = null, contentType = 'application/xml') {
       path,
       method,
       headers: {
-        Authorization: `Basic ${AUTH}`,
+        Authorization: `Basic ${getAuth(calendarUser)}`,
         ...(body ? { 'Content-Type': contentType, 'Content-Length': Buffer.byteLength(body) } : {}),
       },
     };
@@ -85,14 +94,14 @@ export async function listEvents(from, to, calendarUser = CAL_USER, calendarName
   </C:filter>
 </C:calendar-query>`;
 
-  const res = await request('REPORT', `/${calendarUser}/${calendarName}/`, body);
+  const res = await request('REPORT', `/${calendarUser}/${calendarName}/`, body, 'application/xml', calendarUser);
   if (res.status >= 400) throw new Error(`CalDAV error ${res.status}: ${res.body.slice(0, 200)}`);
 
   return parseIcsEvents(res.body);
 }
 
 export async function getEvent(eventId, calendarUser = CAL_USER, calendarName = 'calendar') {
-  const res = await request('GET', `/${calendarUser}/${calendarName}/${eventId}.ics`, null);
+  const res = await request('GET', `/${calendarUser}/${calendarName}/${eventId}.ics`, null, 'application/xml', calendarUser);
   if (res.status === 404) throw new Error(`Event "${eventId}" not found`);
   if (res.status >= 400) throw new Error(`CalDAV error ${res.status}`);
 
@@ -117,7 +126,7 @@ export async function createEvent({ title, start, end, description, location, ca
   lines.push(`DTSTAMP:${formatDate(new Date())}`, 'END:VEVENT', 'END:VCALENDAR');
   const ics = lines.join('\n');
 
-  const res = await request('PUT', `/${calendarUser}/${calendarName}/${uid}.ics`, ics, 'text/calendar');
+  const res = await request('PUT', `/${calendarUser}/${calendarName}/${uid}.ics`, ics, 'text/calendar', calendarUser);
   if (res.status >= 400) throw new Error(`Failed to create event: ${res.status}`);
 
   return { uid, title, start, end };
@@ -125,7 +134,7 @@ export async function createEvent({ title, start, end, description, location, ca
 
 export async function updateEvent({ eventId, title, start, end, description, location, calendarUser = CAL_USER, calendarName = 'calendar' }) {
   // Fetch existing event first
-  const existing = await request('GET', `/${calendarUser}/${calendarName}/${eventId}.ics`, null);
+  const existing = await request('GET', `/${calendarUser}/${calendarName}/${eventId}.ics`, null, 'application/xml', calendarUser);
   if (existing.status === 404) throw new Error(`Event "${eventId}" not found`);
 
   const existingEvents = parseIcsEvents(existing.body);
@@ -148,14 +157,14 @@ export async function updateEvent({ eventId, title, start, end, description, loc
   lines.push(`DTSTAMP:${formatDate(new Date())}`, 'END:VEVENT', 'END:VCALENDAR');
   const ics = lines.join('\n');
 
-  const res = await request('PUT', `/${calendarUser}/${calendarName}/${eventId}.ics`, ics, 'text/calendar');
+  const res = await request('PUT', `/${calendarUser}/${calendarName}/${eventId}.ics`, ics, 'text/calendar', calendarUser);
   if (res.status >= 400) throw new Error(`Failed to update event: ${res.status}`);
 
   return { uid: eventId, updated: true };
 }
 
 export async function deleteEvent(eventId, calendarUser = CAL_USER, calendarName = 'calendar') {
-  const res = await request('DELETE', `/${calendarUser}/${calendarName}/${eventId}.ics`);
+  const res = await request('DELETE', `/${calendarUser}/${calendarName}/${eventId}.ics`, null, 'application/xml', calendarUser);
   if (res.status >= 400) throw new Error(`Failed to delete event: ${res.status}`);
   return { uid: eventId, deleted: true };
 }
