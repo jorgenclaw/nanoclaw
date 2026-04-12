@@ -64,9 +64,21 @@ interface QueuedReply {
   text: string;
 }
 
+export interface WatchNotification {
+  id: string;
+  type: 'email' | 'signal';
+  from: string;
+  preview: string;
+  full_text: string;
+  timestamp: string;
+}
+
 const WATCH_UPLOADS_DIR = path.join(STORE_DIR, 'watch-uploads');
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024; // 2 MB cap on POST body (5s WAV is ~160KB)
 const POLL_QUEUE_MAX = 20;
+const NOTIF_QUEUE_MAX = 50;
+const NOTIF_PREVIEW_LEN = 60;
+const NOTIF_MAX_AGE_MS = 3600_000; // drop notifications older than 1 hour
 
 export class WatchChannel implements Channel {
   public readonly name = 'watch';
@@ -82,6 +94,7 @@ export class WatchChannel implements Channel {
   private server?: http.Server;
   private pendingResolvers: PendingResolver[] = [];
   private pollQueue: QueuedReply[] = [];
+  private notificationQueue: WatchNotification[] = [];
 
   // Optional Signal mirror — set by index.ts after channels are constructed.
   // When wired, every watch exchange is also forwarded to a Signal JID so
@@ -154,9 +167,7 @@ export class WatchChannel implements Channel {
     }
     this.pendingResolvers = [];
     if (this.server) {
-      await new Promise<void>((resolve) =>
-        this.server!.close(() => resolve()),
-      );
+      await new Promise<void>((resolve) => this.server!.close(() => resolve()));
       this.server = undefined;
     }
   }
@@ -176,17 +187,19 @@ export class WatchChannel implements Channel {
   // Map the most common Unicode punctuation back to ASCII equivalents,
   // then strip anything still outside printable ASCII as a safety net.
   private normalizeForWatch(text: string): string {
-    return text
-      .replace(/[\u2014\u2013]/g, '-')     // em-dash, en-dash
-      .replace(/[\u201C\u201D]/g, '"')     // smart double quotes
-      .replace(/[\u2018\u2019]/g, "'")     // smart single quotes
-      .replace(/\u2026/g, '...')           // ellipsis
-      .replace(/\u2022/g, '*')             // bullet
-      .replace(/\u2192/g, '->')            // right arrow
-      .replace(/\u00A0/g, ' ')             // non-breaking space
-      // Anything still non-ASCII (emoji, currency, accented chars) becomes
-      // empty rather than a white box.
-      .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '');
+    return (
+      text
+        .replace(/[\u2014\u2013]/g, '-') // em-dash, en-dash
+        .replace(/[\u201C\u201D]/g, '"') // smart double quotes
+        .replace(/[\u2018\u2019]/g, "'") // smart single quotes
+        .replace(/\u2026/g, '...') // ellipsis
+        .replace(/\u2022/g, '*') // bullet
+        .replace(/\u2192/g, '->') // right arrow
+        .replace(/\u00A0/g, ' ') // non-breaking space
+        // Anything still non-ASCII (emoji, currency, accented chars) becomes
+        // empty rather than a white box.
+        .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '')
+    );
   }
 
   async sendMessage(
@@ -229,6 +242,60 @@ export class WatchChannel implements Channel {
   }
 
   // -----------------------------------------------------------------------
+  // Proactive notifications — pushed by external sources, polled by watch
+  // -----------------------------------------------------------------------
+
+  /**
+   * Push a notification for the watch to pick up on its next poll.
+   * Called from index.ts when a Signal message or email arrives from a
+   * known contact. The watch polls GET /api/watch/notifications?since=...
+   * to fetch new items.
+   */
+  addNotification(
+    type: 'email' | 'signal',
+    from: string,
+    fullText: string,
+  ): void {
+    const normalized = this.normalizeForWatch(fullText);
+    const preview =
+      normalized.length > NOTIF_PREVIEW_LEN
+        ? normalized.slice(0, NOTIF_PREVIEW_LEN - 3) + '...'
+        : normalized;
+    const notif: WatchNotification = {
+      id: `notif-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+      type,
+      from: this.normalizeForWatch(from),
+      preview,
+      full_text: normalized.slice(0, 1024),
+      timestamp: new Date().toISOString(),
+    };
+    this.notificationQueue.push(notif);
+    // Trim old items.
+    const cutoff = Date.now() - NOTIF_MAX_AGE_MS;
+    this.notificationQueue = this.notificationQueue.filter(
+      (n) => new Date(n.timestamp).getTime() > cutoff,
+    );
+    while (this.notificationQueue.length > NOTIF_QUEUE_MAX)
+      this.notificationQueue.shift();
+    logger.info(
+      { type, from, previewLen: preview.length, queueSize: this.notificationQueue.length },
+      'watch: notification queued',
+    );
+  }
+
+  private handleNotifications(
+    url: URL,
+    res: http.ServerResponse,
+  ): void {
+    const since = url.searchParams.get('since') || '1970-01-01T00:00:00.000Z';
+    const sinceMs = new Date(since).getTime();
+    const items = this.notificationQueue.filter(
+      (n) => new Date(n.timestamp).getTime() > sinceMs,
+    );
+    this.sendJson(res, 200, { notifications: items });
+  }
+
+  // -----------------------------------------------------------------------
   // HTTP request handling
   // -----------------------------------------------------------------------
 
@@ -253,6 +320,11 @@ export class WatchChannel implements Channel {
 
     if (req.method === 'GET' && url.pathname === '/api/watch/poll') {
       this.handlePoll(res);
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/watch/notifications') {
+      this.handleNotifications(url, res);
       return;
     }
 
@@ -348,15 +420,14 @@ export class WatchChannel implements Channel {
   // Message injection + sync/slow path
   // -----------------------------------------------------------------------
 
-  private injectAndAwaitReply(
-    text: string,
-    deviceId: string,
-  ): Promise<string> {
+  private injectAndAwaitReply(text: string, deviceId: string): Promise<string> {
     return new Promise<string>((resolve) => {
       // Register a pending resolver BEFORE injecting — eliminates the race
       // where the agent's first sendMessage fires before we're listening.
       const timer = setTimeout(() => {
-        const idx = this.pendingResolvers.findIndex((r) => r.resolve === wrappedResolve);
+        const idx = this.pendingResolvers.findIndex(
+          (r) => r.resolve === wrappedResolve,
+        );
         if (idx >= 0) this.pendingResolvers.splice(idx, 1);
         logger.info(
           { textLen: text.length },

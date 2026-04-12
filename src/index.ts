@@ -18,6 +18,7 @@ import {
   SIGNAL_PHONE_NUMBER,
   TIMEZONE,
   TRIGGER_PATTERN,
+  WATCH_JID,
   WATCH_SIGNAL_MIRROR_JID,
   WN_ACCOUNT_PUBKEY,
   messageHasTrigger,
@@ -917,6 +918,22 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+
+      // Push Signal messages from other people to the watch notification
+      // queue so Scott gets a buzz on his wrist. Skip self-messages, bot
+      // messages, and messages from the watch channel itself.
+      if (
+        !msg.is_from_me &&
+        !msg.is_bot_message &&
+        chatJid.startsWith('signal:') &&
+        chatJid !== WATCH_JID
+      ) {
+        const wch = channels.find((c) => c.name === 'watch');
+        if (wch && 'addNotification' in wch) {
+          (wch as unknown as { addNotification: (t: string, f: string, b: string) => void })
+            .addNotification('signal', msg.sender_name || 'Unknown', msg.content);
+        }
+      }
     },
     onChatMetadata: (
       chatJid: string,
