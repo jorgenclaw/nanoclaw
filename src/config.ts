@@ -77,6 +77,19 @@ export const WATCH_GROUP_FOLDER = process.env.WATCH_GROUP_FOLDER || 'watch';
 export const WATCH_SYNC_TIMEOUT_MS = parseInt(process.env.WATCH_SYNC_TIMEOUT_MS || '45000', 10);
 export const WATCH_SIGNAL_MIRROR_JID = process.env.WATCH_SIGNAL_MIRROR_JID || '';
 
+// White Noise (Nostr/MLS encrypted messaging)
+export const WN_BINARY_PATH = process.env.WN_BINARY_PATH || path.join(HOME_DIR, '.local', 'bin', 'wn');
+export const WN_SOCKET_PATH = process.env.WN_SOCKET_PATH || path.join(HOME_DIR, '.local', 'share', 'whitenoise-cli', 'release', 'wnd.sock');
+export const WN_ACCOUNT_PUBKEY = process.env.WN_ACCOUNT_PUBKEY || '';
+
+// Nostr DM (NIP-17)
+export const NOSTR_SIGNER_SOCKET = process.env.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
+export const NOSTR_DM_RELAYS = (process.env.NOSTR_DM_RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band').split(',');
+export const NOSTR_DM_ALLOWLIST = new Set((process.env.NOSTR_DM_ALLOWLIST || '').split(',').filter(Boolean));
+
+// Credential Proxy
+export const CREDENTIAL_PROXY_PORT = parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10);
+
 // Local Whisper transcription
 export const WHISPER_BIN = process.env.WHISPER_BIN ?? path.join(HOME_DIR, '.local', 'bin', 'whisper-cli');
 export const WHISPER_MODEL = process.env.WHISPER_MODEL ?? path.join(HOME_DIR, '.local', 'share', 'whisper', 'models', 'ggml-base.en.bin');
