@@ -6,7 +6,11 @@
  */
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
+import { CREDENTIAL_PROXY_PORT, DATA_DIR } from './config.js';
+import { PROXY_BIND_HOST } from './container-runtime.js';
+import { startCredentialProxy } from './credential-proxy.js';
+import { initHealthMonitor } from './health.js';
+import { loadSecurityPolicy } from './security-policy.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { getMessagingGroupsByChannel, getMessagingGroupAgents } from './db/messaging-groups.js';
@@ -68,6 +72,13 @@ async function main(): Promise<void> {
   ensureContainerRuntimeRunning();
   cleanupOrphans();
 
+  // 2.5 Security policy
+  const securityPolicy = loadSecurityPolicy();
+  log.info('Security policy loaded');
+
+  // 2.6 Credential proxy
+  await startCredentialProxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST);
+
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     const conversations = buildConversationConfigs(adapter.channelType);
@@ -113,6 +124,22 @@ async function main(): Promise<void> {
       },
     };
   });
+
+  // 3.5 Health monitor — delivers alerts through whichever channel is available
+  const signalAdapter = getChannelAdapter('signal');
+  if (signalAdapter) {
+    initHealthMonitor({
+      sendAlert: async (text: string) => {
+        // Deliver to the first known owner via Signal
+        // This is best-effort — if no owner is wired, alerts go to log only
+        const conversations = buildConversationConfigs('signal');
+        const firstDm = conversations.find((c) => !c.requiresTrigger);
+        if (firstDm) {
+          await signalAdapter.deliver(firstDm.platformId, null, { kind: 'text', content: { text } });
+        }
+      },
+    });
+  }
 
   // 4. Delivery adapter bridge — dispatches to channel adapters
   const deliveryAdapter = {

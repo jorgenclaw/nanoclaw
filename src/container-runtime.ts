@@ -3,6 +3,7 @@
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
+import fs from 'fs';
 import os from 'os';
 
 import { log } from './log.js';
@@ -10,9 +11,24 @@ import { log } from './log.js';
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
 
+function isBareMetalLinux(): boolean {
+  if (os.platform() !== 'linux') return false;
+  try {
+    fs.accessSync('/proc/sys/fs/binfmt_misc/WSLInterop');
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+export const CONTAINER_HOST_GATEWAY = isBareMetalLinux() ? '127.0.0.1' : 'host.docker.internal';
+export const PROXY_BIND_HOST = process.env.PROXY_BIND_HOST || (isBareMetalLinux() ? '127.0.0.1' : '0.0.0.0');
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
+  if (isBareMetalLinux()) {
+    return ['--network', 'host'];
+  }
   if (os.platform() === 'linux') {
     return ['--add-host=host.docker.internal:host-gateway'];
   }

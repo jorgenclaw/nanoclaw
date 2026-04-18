@@ -7,11 +7,12 @@ import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { OneCLI } from '@onecli-sh/sdk';
-
-import { CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR, IDLE_TIMEOUT, ONECLI_URL, TIMEZONE } from './config.js';
+import { CONTAINER_IMAGE, CREDENTIAL_PROXY_PORT, DATA_DIR, GROUPS_DIR, IDLE_TIMEOUT, TIMEZONE } from './config.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { CONTAINER_HOST_GATEWAY, CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
+import { getRegisteredChannelNames, getChannelContainerConfig } from './channels/channel-registry.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
@@ -34,7 +35,6 @@ import {
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
 
-const onecli = new OneCLI({ url: ONECLI_URL });
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
@@ -103,10 +103,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const mounts = buildMounts(agentGroup, session, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
-  // OneCLI agent identifier is always the agent group id — stable across
-  // sessions and reversible via getAgentGroup() for approval routing.
-  const agentIdentifier = agentGroup.id;
-  const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution, agentIdentifier);
+  const args = await buildContainerArgs(mounts, containerName, agentGroup, provider, contribution);
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
 
@@ -251,7 +248,6 @@ async function buildContainerArgs(
   agentGroup: AgentGroup,
   provider: string,
   providerContribution: ProviderContainerContribution,
-  agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName];
 
@@ -305,22 +301,43 @@ async function buildContainerArgs(
     args.push('-e', `NANOCLAW_ADMIN_USER_IDS=${Array.from(adminUserIds).join(',')}`);
   }
 
-  // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection.
-  // Must ensureAgent first for non-admin groups, otherwise applyContainerConfig
-  // rejects the unknown agent identifier and returns false.
-  try {
-    if (agentIdentifier) {
-      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  // Credential proxy — containers connect to the proxy instead of Anthropic
+  // directly. The proxy injects real credentials at request time.
+  const authMode = detectAuthMode();
+  args.push('-e', `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`);
+  if (authMode === 'api-key') {
+    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  } else {
+    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder-oauth-token');
+  }
+
+  // Channel-contributed mounts and env vars
+  for (const channelName of getRegisteredChannelNames()) {
+    const channelConfig = getChannelContainerConfig(channelName);
+    if (channelConfig?.mounts) {
+      for (const m of channelConfig.mounts) {
+        if (fs.existsSync(m.hostPath)) {
+          if (m.readonly) {
+            args.push(...readonlyMountArgs(m.hostPath, m.containerPath));
+          } else {
+            args.push('-v', `${m.hostPath}:${m.containerPath}`);
+          }
+        }
+      }
     }
-    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-    if (onecliApplied) {
-      log.info('OneCLI gateway applied', { containerName });
-    } else {
-      log.warn('OneCLI gateway not applied — container will have no credentials', { containerName });
+    if (channelConfig?.env) {
+      for (const [key, value] of Object.entries(channelConfig.env)) {
+        args.push('-e', `${key}=${value}`);
+      }
     }
-  } catch (err) {
-    log.warn('OneCLI gateway error — container will have no credentials', { containerName, err });
+  }
+
+  // Main-group-only env vars from .env (GitHub, AWS, OpenAI)
+  const mainSecrets = readEnvFile(['GH_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'REMOTION_AWS_BUCKET', 'REMOTION_SERVE_URL', 'OPENAI_API_KEY']);
+  if (agentGroup.folder === 'main') {
+    for (const [key, value] of Object.entries(mainSecrets)) {
+      if (value) args.push('-e', `${key}=${value}`);
+    }
   }
 
   // Host gateway
