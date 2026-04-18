@@ -5,7 +5,16 @@ import { readEnvFile } from './env.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'TZ']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'TZ',
+  'SIGNAL_PHONE_NUMBER', 'SIGNAL_CLI_TCP_HOST', 'SIGNAL_CLI_TCP_PORT',
+  'WATCH_AUTH_TOKEN', 'WATCH_HTTP_PORT', 'WATCH_HTTP_BIND', 'WATCH_JID',
+  'WATCH_GROUP_FOLDER', 'WATCH_SYNC_TIMEOUT_MS', 'WATCH_SIGNAL_MIRROR_JID',
+  'WN_BINARY_PATH', 'WN_SOCKET_PATH', 'WN_ACCOUNT_PUBKEY',
+  'NOSTR_SIGNER_SOCKET', 'NOSTR_DM_RELAYS', 'NOSTR_DM_ALLOWLIST',
+  'CREDENTIAL_PROXY_PORT', 'SECURITY_POLICY_PATH', 'MCP_SERVER_ENABLED',
+  'WHISPER_BIN', 'WHISPER_MODEL',
+]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
@@ -64,38 +73,38 @@ export const TIMEZONE = resolveConfigTimezone();
 // --- Custom channel config ---
 
 // Signal (TCP JSON-RPC to signal-cli daemon)
-export const SIGNAL_PHONE_NUMBER = process.env.SIGNAL_PHONE_NUMBER || '';
-export const SIGNAL_CLI_TCP_HOST = process.env.SIGNAL_CLI_TCP_HOST || '127.0.0.1';
-export const SIGNAL_CLI_TCP_PORT = parseInt(process.env.SIGNAL_CLI_TCP_PORT || '7583', 10);
+export const SIGNAL_PHONE_NUMBER = process.env.SIGNAL_PHONE_NUMBER || envConfig.SIGNAL_PHONE_NUMBER || '';
+export const SIGNAL_CLI_TCP_HOST = process.env.SIGNAL_CLI_TCP_HOST || envConfig.SIGNAL_CLI_TCP_HOST || '127.0.0.1';
+export const SIGNAL_CLI_TCP_PORT = parseInt(process.env.SIGNAL_CLI_TCP_PORT || envConfig.SIGNAL_CLI_TCP_PORT || '7583', 10);
 
 // Watch (T-Watch S3 HTTP server)
-export const WATCH_AUTH_TOKEN = process.env.WATCH_AUTH_TOKEN || '';
-export const WATCH_HTTP_PORT = parseInt(process.env.WATCH_HTTP_PORT || '3000', 10);
-export const WATCH_HTTP_BIND = process.env.WATCH_HTTP_BIND || '0.0.0.0';
-export const WATCH_JID = process.env.WATCH_JID || 'watch:device';
-export const WATCH_GROUP_FOLDER = process.env.WATCH_GROUP_FOLDER || 'watch';
-export const WATCH_SYNC_TIMEOUT_MS = parseInt(process.env.WATCH_SYNC_TIMEOUT_MS || '45000', 10);
-export const WATCH_SIGNAL_MIRROR_JID = process.env.WATCH_SIGNAL_MIRROR_JID || '';
+export const WATCH_AUTH_TOKEN = process.env.WATCH_AUTH_TOKEN || envConfig.WATCH_AUTH_TOKEN || '';
+export const WATCH_HTTP_PORT = parseInt(process.env.WATCH_HTTP_PORT || envConfig.WATCH_HTTP_PORT || '3000', 10);
+export const WATCH_HTTP_BIND = process.env.WATCH_HTTP_BIND || envConfig.WATCH_HTTP_BIND || '0.0.0.0';
+export const WATCH_JID = process.env.WATCH_JID || envConfig.WATCH_JID || 'watch:device';
+export const WATCH_GROUP_FOLDER = process.env.WATCH_GROUP_FOLDER || envConfig.WATCH_GROUP_FOLDER || 'watch';
+export const WATCH_SYNC_TIMEOUT_MS = parseInt(process.env.WATCH_SYNC_TIMEOUT_MS || envConfig.WATCH_SYNC_TIMEOUT_MS || '45000', 10);
+export const WATCH_SIGNAL_MIRROR_JID = process.env.WATCH_SIGNAL_MIRROR_JID || envConfig.WATCH_SIGNAL_MIRROR_JID || '';
 
 // White Noise (Nostr/MLS encrypted messaging)
-export const WN_BINARY_PATH = process.env.WN_BINARY_PATH || path.join(HOME_DIR, '.local', 'bin', 'wn');
-export const WN_SOCKET_PATH = process.env.WN_SOCKET_PATH || path.join(HOME_DIR, '.local', 'share', 'whitenoise-cli', 'release', 'wnd.sock');
-export const WN_ACCOUNT_PUBKEY = process.env.WN_ACCOUNT_PUBKEY || '';
+export const WN_BINARY_PATH = process.env.WN_BINARY_PATH || envConfig.WN_BINARY_PATH || path.join(HOME_DIR, '.local', 'bin', 'wn');
+export const WN_SOCKET_PATH = process.env.WN_SOCKET_PATH || envConfig.WN_SOCKET_PATH || path.join(HOME_DIR, '.local', 'share', 'whitenoise-cli', 'release', 'wnd.sock');
+export const WN_ACCOUNT_PUBKEY = process.env.WN_ACCOUNT_PUBKEY || envConfig.WN_ACCOUNT_PUBKEY || '';
 
 // Nostr DM (NIP-17)
-export const NOSTR_SIGNER_SOCKET = process.env.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
-export const NOSTR_DM_RELAYS = (process.env.NOSTR_DM_RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band').split(',');
-export const NOSTR_DM_ALLOWLIST = new Set((process.env.NOSTR_DM_ALLOWLIST || '').split(',').filter(Boolean));
+export const NOSTR_SIGNER_SOCKET = process.env.NOSTR_SIGNER_SOCKET || envConfig.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
+export const NOSTR_DM_RELAYS = (process.env.NOSTR_DM_RELAYS || envConfig.NOSTR_DM_RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band').split(',');
+export const NOSTR_DM_ALLOWLIST = new Set((process.env.NOSTR_DM_ALLOWLIST || envConfig.NOSTR_DM_ALLOWLIST || '').split(',').filter(Boolean));
 
 // MCP Server
-export const MCP_SERVER_ENABLED = process.env.MCP_SERVER_ENABLED === 'true';
+export const MCP_SERVER_ENABLED = (process.env.MCP_SERVER_ENABLED || envConfig.MCP_SERVER_ENABLED) === 'true';
 
 // Security Policy
-export const SECURITY_POLICY_PATH = process.env.SECURITY_POLICY_PATH || path.join(HOME_DIR, '.config', 'nanoclaw', 'security-policy.json');
+export const SECURITY_POLICY_PATH = process.env.SECURITY_POLICY_PATH || envConfig.SECURITY_POLICY_PATH || path.join(HOME_DIR, '.config', 'nanoclaw', 'security-policy.json');
 
 // Credential Proxy
-export const CREDENTIAL_PROXY_PORT = parseInt(process.env.CREDENTIAL_PROXY_PORT || '3001', 10);
+export const CREDENTIAL_PROXY_PORT = parseInt(process.env.CREDENTIAL_PROXY_PORT || envConfig.CREDENTIAL_PROXY_PORT || '3001', 10);
 
 // Local Whisper transcription
-export const WHISPER_BIN = process.env.WHISPER_BIN ?? path.join(HOME_DIR, '.local', 'bin', 'whisper-cli');
-export const WHISPER_MODEL = process.env.WHISPER_MODEL ?? path.join(HOME_DIR, '.local', 'share', 'whisper', 'models', 'ggml-base.en.bin');
+export const WHISPER_BIN = process.env.WHISPER_BIN ?? envConfig.WHISPER_BIN ?? path.join(HOME_DIR, '.local', 'bin', 'whisper-cli');
+export const WHISPER_MODEL = process.env.WHISPER_MODEL ?? envConfig.WHISPER_MODEL ?? path.join(HOME_DIR, '.local', 'share', 'whisper', 'models', 'ggml-base.en.bin');

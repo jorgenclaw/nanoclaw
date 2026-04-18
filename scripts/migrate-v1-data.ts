@@ -157,7 +157,7 @@ function main(): void {
   // Create owner role if not exists
   const existingRole = v2.prepare("SELECT user_id FROM user_roles WHERE user_id = ? AND role = 'owner'").get(scottUserId);
   if (!existingRole) {
-    v2.prepare("INSERT INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at) VALUES (?, 'owner', NULL, 'migration', ?)")
+    v2.prepare("INSERT INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at) VALUES (?, 'owner', NULL, NULL, ?)")
       .run(scottUserId, now);
     console.log(`  Created owner role for Scott`);
   }
