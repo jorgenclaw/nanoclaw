@@ -14,8 +14,8 @@ export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
-const PROJECT_ROOT = process.cwd();
-const HOME_DIR = process.env.HOME || os.homedir();
+export const PROJECT_ROOT = process.cwd();
+export const HOME_DIR = process.env.HOME || os.homedir();
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
@@ -60,3 +60,23 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// --- Custom channel config ---
+
+// Signal (TCP JSON-RPC to signal-cli daemon)
+export const SIGNAL_PHONE_NUMBER = process.env.SIGNAL_PHONE_NUMBER || '';
+export const SIGNAL_CLI_TCP_HOST = process.env.SIGNAL_CLI_TCP_HOST || '127.0.0.1';
+export const SIGNAL_CLI_TCP_PORT = parseInt(process.env.SIGNAL_CLI_TCP_PORT || '7583', 10);
+
+// Watch (T-Watch S3 HTTP server)
+export const WATCH_AUTH_TOKEN = process.env.WATCH_AUTH_TOKEN || '';
+export const WATCH_HTTP_PORT = parseInt(process.env.WATCH_HTTP_PORT || '3000', 10);
+export const WATCH_HTTP_BIND = process.env.WATCH_HTTP_BIND || '0.0.0.0';
+export const WATCH_JID = process.env.WATCH_JID || 'watch:device';
+export const WATCH_GROUP_FOLDER = process.env.WATCH_GROUP_FOLDER || 'watch';
+export const WATCH_SYNC_TIMEOUT_MS = parseInt(process.env.WATCH_SYNC_TIMEOUT_MS || '45000', 10);
+export const WATCH_SIGNAL_MIRROR_JID = process.env.WATCH_SIGNAL_MIRROR_JID || '';
+
+// Local Whisper transcription
+export const WHISPER_BIN = process.env.WHISPER_BIN ?? path.join(HOME_DIR, '.local', 'bin', 'whisper-cli');
+export const WHISPER_MODEL = process.env.WHISPER_MODEL ?? path.join(HOME_DIR, '.local', 'share', 'whisper', 'models', 'ggml-base.en.bin');

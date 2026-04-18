@@ -7,3 +7,5 @@
 // self-registration import below.
 
 import './cli.js';
+import './signal.js';
+import './watch.js';
