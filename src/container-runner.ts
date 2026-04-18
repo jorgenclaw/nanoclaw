@@ -9,7 +9,13 @@ import path from 'path';
 
 import { CONTAINER_IMAGE, CREDENTIAL_PROXY_PORT, DATA_DIR, GROUPS_DIR, IDLE_TIMEOUT, TIMEZONE } from './config.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
-import { CONTAINER_HOST_GATEWAY, CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_HOST_GATEWAY,
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
 import { getRegisteredChannelNames, getChannelContainerConfig } from './channels/channel-registry.js';
@@ -28,14 +34,8 @@ import {
   type ProviderContainerContribution,
   type VolumeMount,
 } from './providers/provider-container-registry.js';
-import {
-  markContainerRunning,
-  markContainerStopped,
-  sessionDir,
-  writeSessionRouting,
-} from './session-manager.js';
+import { markContainerRunning, markContainerStopped, sessionDir, writeSessionRouting } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
-
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
@@ -352,7 +352,15 @@ async function buildContainerArgs(
   }
 
   // Main-group-only env vars from .env (GitHub, AWS, OpenAI)
-  const mainSecrets = readEnvFile(['GH_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'REMOTION_AWS_BUCKET', 'REMOTION_SERVE_URL', 'OPENAI_API_KEY']);
+  const mainSecrets = readEnvFile([
+    'GH_TOKEN',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_REGION',
+    'REMOTION_AWS_BUCKET',
+    'REMOTION_SERVE_URL',
+    'OPENAI_API_KEY',
+  ]);
   if (agentGroup.folder === 'main') {
     for (const [key, value] of Object.entries(mainSecrets)) {
       if (value) args.push('-e', `${key}=${value}`);

@@ -19,9 +19,7 @@ function getOpenAIKey(): string {
   return process.env.OPENAI_API_KEY || env.OPENAI_API_KEY || '';
 }
 
-async function toWav(
-  filePath: string,
-): Promise<{ wavPath: string; cleanup: () => void }> {
+async function toWav(filePath: string): Promise<{ wavPath: string; cleanup: () => void }> {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.wav') {
     return { wavPath: filePath, cleanup: () => {} };
@@ -34,11 +32,7 @@ async function toWav(
 async function transcribeLocal(wavPath: string): Promise<string> {
   const outputTxt = wavPath + '.txt';
   try {
-    await execFileAsync(WHISPER_BIN, [
-      '-m', WHISPER_MODEL,
-      '-f', wavPath,
-      '--output-txt', '--no-prints', '-nt',
-    ]);
+    await execFileAsync(WHISPER_BIN, ['-m', WHISPER_MODEL, '-f', wavPath, '--output-txt', '--no-prints', '-nt']);
     return fs.readFileSync(outputTxt, 'utf8').trim();
   } finally {
     fs.unlink(outputTxt, () => {});

@@ -13,11 +13,7 @@ import path from 'path';
 import { GROUPS_DIR } from './config.js';
 import { getDb, hasTable } from './db/connection.js';
 import { createAgentGroup, getAgentGroupByFolder } from './db/agent-groups.js';
-import {
-  createMessagingGroup,
-  createMessagingGroupAgent,
-  getMessagingGroupByPlatform,
-} from './db/messaging-groups.js';
+import { createMessagingGroup, createMessagingGroupAgent, getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import { registerDeliveryAction } from './delivery.js';
 import { log } from './log.js';
 import type { Session } from './types.js';
@@ -46,7 +42,10 @@ registerDeliveryAction('register_contact', async (content) => {
   const existingUser = db.prepare('SELECT id FROM users WHERE id = ?').get(userId);
   if (!existingUser) {
     db.prepare('INSERT INTO users (id, kind, display_name, created_at) VALUES (?, ?, ?, ?)').run(
-      userId, channelType, displayName, now,
+      userId,
+      channelType,
+      displayName,
+      now,
     );
     log.info('register_contact: created user', { userId, displayName });
   }
@@ -83,18 +82,24 @@ registerDeliveryAction('register_contact', async (content) => {
       unknown_sender_policy: 'request_approval',
       created_at: now,
     });
-    mg = { id: mgId, channel_type: channelType, platform_id: platformId, name: displayName, is_group: 0, unknown_sender_policy: 'request_approval' as const, created_at: now };
+    mg = {
+      id: mgId,
+      channel_type: channelType,
+      platform_id: platformId,
+      name: displayName,
+      is_group: 0,
+      unknown_sender_policy: 'request_approval' as const,
+      created_at: now,
+    };
     log.info('register_contact: created messaging group', { mgId, channelType, platformId });
   }
 
   // Wire messaging group to agent group
-  const existingWiring = db.prepare(
-    'SELECT id FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?',
-  ).get(mg.id, ag.id);
+  const existingWiring = db
+    .prepare('SELECT id FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?')
+    .get(mg.id, ag.id);
   if (!existingWiring) {
-    const triggerRules = requiresTrigger
-      ? JSON.stringify({ pattern: '@Jorgenclaw', requiresTrigger: true })
-      : null;
+    const triggerRules = requiresTrigger ? JSON.stringify({ pattern: '@Jorgenclaw', requiresTrigger: true }) : null;
     createMessagingGroupAgent({
       id: genId('mga'),
       messaging_group_id: mg.id,
@@ -110,9 +115,9 @@ registerDeliveryAction('register_contact', async (content) => {
 
   // Add user as member of agent group
   if (hasTable(db, 'agent_group_members')) {
-    const existingMember = db.prepare(
-      'SELECT user_id FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?',
-    ).get(userId, ag.id);
+    const existingMember = db
+      .prepare('SELECT user_id FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
+      .get(userId, ag.id);
     if (!existingMember) {
       db.prepare(
         'INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at) VALUES (?, ?, NULL, ?)',
@@ -123,13 +128,13 @@ registerDeliveryAction('register_contact', async (content) => {
 
   // Also add the owner (Scott) as member so he can see the conversation
   if (hasTable(db, 'user_roles') && hasTable(db, 'agent_group_members')) {
-    const owners = db.prepare(
-      "SELECT user_id FROM user_roles WHERE role = 'owner' AND agent_group_id IS NULL",
-    ).all() as Array<{ user_id: string }>;
+    const owners = db
+      .prepare("SELECT user_id FROM user_roles WHERE role = 'owner' AND agent_group_id IS NULL")
+      .all() as Array<{ user_id: string }>;
     for (const owner of owners) {
-      const ownerMember = db.prepare(
-        'SELECT user_id FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?',
-      ).get(owner.user_id, ag.id);
+      const ownerMember = db
+        .prepare('SELECT user_id FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
+        .get(owner.user_id, ag.id);
       if (!ownerMember) {
         db.prepare(
           'INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at) VALUES (?, ?, NULL, ?)',

@@ -5,18 +5,12 @@ const lastAlerted = new Map<string, number>();
 
 let sendAlertFn: ((text: string) => Promise<void>) | undefined;
 
-export function initHealthMonitor(opts: {
-  sendAlert: (text: string) => Promise<void>;
-}): void {
+export function initHealthMonitor(opts: { sendAlert: (text: string) => Promise<void> }): void {
   sendAlertFn = opts.sendAlert;
   log.info('Health monitor initialized');
 }
 
-export async function reportError(
-  category: string,
-  message: string,
-  details?: Record<string, unknown>,
-): Promise<void> {
+export async function reportError(category: string, message: string, details?: Record<string, unknown>): Promise<void> {
   log.error(`[health] ${message}`, { category, ...details });
 
   if (!sendAlertFn) return;

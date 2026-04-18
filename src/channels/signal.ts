@@ -4,27 +4,14 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 
-import {
-  ASSISTANT_NAME,
-  SIGNAL_CLI_TCP_HOST,
-  SIGNAL_CLI_TCP_PORT,
-  SIGNAL_PHONE_NUMBER,
-} from '../config.js';
+import { ASSISTANT_NAME, SIGNAL_CLI_TCP_HOST, SIGNAL_CLI_TCP_PORT, SIGNAL_PHONE_NUMBER } from '../config.js';
 import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
 import { transcribeAudio } from '../transcription.js';
-import type {
-  ChannelAdapter,
-  ChannelRegistration,
-  ChannelSetup,
-  InboundMessage,
-  OutboundMessage,
-} from './adapter.js';
+import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
-const SIGNAL_CLI_ATTACHMENTS_DIR = path.join(
-  os.homedir(), '.local', 'share', 'signal-cli', 'attachments',
-);
+const SIGNAL_CLI_ATTACHMENTS_DIR = path.join(os.homedir(), '.local', 'share', 'signal-cli', 'attachments');
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -161,10 +148,7 @@ function createSignalAdapter(): ChannelAdapter | null {
     if (reconnectTimer) return;
     reconnectAttempts++;
     if (reconnectAttempts === 3) {
-      reportError(
-        'signal-disconnect',
-        `Signal connection lost. Failed to reconnect ${reconnectAttempts} times.`,
-      );
+      reportError('signal-disconnect', `Signal connection lost. Failed to reconnect ${reconnectAttempts} times.`);
     }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -180,9 +164,7 @@ function createSignalAdapter(): ChannelAdapter | null {
     const envelope = params?.envelope ?? params?.result?.envelope;
     if (!envelope) return;
     lastReceiveEvent = Date.now();
-    const timestamp = envelope.timestamp
-      ? new Date(envelope.timestamp).toISOString()
-      : new Date().toISOString();
+    const timestamp = envelope.timestamp ? new Date(envelope.timestamp).toISOString() : new Date().toISOString();
 
     // Sync messages (sent from another device)
     if (envelope.syncMessage?.sentMessage) {
@@ -210,12 +192,8 @@ function createSignalAdapter(): ChannelAdapter | null {
     const dataMsg = envelope.dataMessage;
     if (!dataMsg) return;
 
-    const audioAttachment = dataMsg.attachments?.find(
-      (a) => a.contentType?.startsWith('audio/') && a.id,
-    );
-    const imageAttachments = dataMsg.attachments?.filter(
-      (a) => a.contentType?.startsWith('image/') && a.id,
-    ) ?? [];
+    const audioAttachment = dataMsg.attachments?.find((a) => a.contentType?.startsWith('audio/') && a.id);
+    const imageAttachments = dataMsg.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
     if (!dataMsg.message && !audioAttachment && imageAttachments.length === 0) return;
 
     const senderId = envelope.source || envelope.sourceNumber || '';
@@ -226,8 +204,7 @@ function createSignalAdapter(): ChannelAdapter | null {
     if (dataMsg.message) {
       content = resolveMentions(dataMsg.message, dataMsg.mentions);
     } else if (audioAttachment) {
-      const filePath = audioAttachment.localPath ||
-        path.join(SIGNAL_CLI_ATTACHMENTS_DIR, audioAttachment.id!);
+      const filePath = audioAttachment.localPath || path.join(SIGNAL_CLI_ATTACHMENTS_DIR, audioAttachment.id!);
       try {
         const transcript = await transcribeAudio(filePath);
         content = `[Voice: ${transcript}]`;
@@ -317,9 +294,7 @@ function createSignalAdapter(): ChannelAdapter | null {
         try {
           const obj = JSON.parse(trimmed) as JsonRpcMessage;
           if (obj.method === 'receive') {
-            handleReceiveEvent(obj).catch((err) =>
-              log.error('Error handling receive event', { err }),
-            );
+            handleReceiveEvent(obj).catch((err) => log.error('Error handling receive event', { err }));
           }
         } catch (err) {
           log.warn('Failed to parse signal-cli message', { err, line: trimmed.slice(0, 100) });
@@ -342,38 +317,41 @@ function createSignalAdapter(): ChannelAdapter | null {
 
   function startWatchdog(): void {
     if (watchdogTimer) return;
-    watchdogTimer = setInterval(() => {
-      const now = Date.now();
+    watchdogTimer = setInterval(
+      () => {
+        const now = Date.now();
 
-      const minSinceReceive = (now - lastReceiveEvent) / (1000 * 60);
-      const minSinceConnect = (now - lastSignalCliRestart) / (1000 * 60);
-      if (connected && minSinceConnect >= 10 && minSinceReceive >= 10) {
-        log.warn('Watchdog: no receive events for 10+ min — reconnecting', {
-          minSinceReceive: minSinceReceive.toFixed(1),
-        });
-        lastReceiveEvent = now;
-        socket?.destroy();
-        return;
-      }
-
-      const hoursSinceGroupMsg = (now - lastGroupDataMessage) / (1000 * 60 * 60);
-      const hoursSinceRestart = (now - lastSignalCliRestart) / (1000 * 60 * 60);
-      if (hoursSinceGroupMsg >= 6 || hoursSinceRestart >= 8) {
-        log.info('Watchdog: restarting signal-cli', {
-          hoursSinceGroupMsg: hoursSinceGroupMsg.toFixed(1),
-          hoursSinceRestart: hoursSinceRestart.toFixed(1),
-        });
-        try {
-          lastSignalCliRestart = Date.now();
-          lastGroupDataMessage = Date.now();
-          execSync('systemctl --user restart signal-cli', { timeout: 15000 });
-          log.info('signal-cli restarted by watchdog');
-        } catch (err) {
-          log.error('Watchdog failed to restart signal-cli', { err });
-          reportError('signal-cli-watchdog', 'Failed to restart signal-cli via watchdog');
+        const minSinceReceive = (now - lastReceiveEvent) / (1000 * 60);
+        const minSinceConnect = (now - lastSignalCliRestart) / (1000 * 60);
+        if (connected && minSinceConnect >= 10 && minSinceReceive >= 10) {
+          log.warn('Watchdog: no receive events for 10+ min — reconnecting', {
+            minSinceReceive: minSinceReceive.toFixed(1),
+          });
+          lastReceiveEvent = now;
+          socket?.destroy();
+          return;
         }
-      }
-    }, 5 * 60 * 1000);
+
+        const hoursSinceGroupMsg = (now - lastGroupDataMessage) / (1000 * 60 * 60);
+        const hoursSinceRestart = (now - lastSignalCliRestart) / (1000 * 60 * 60);
+        if (hoursSinceGroupMsg >= 6 || hoursSinceRestart >= 8) {
+          log.info('Watchdog: restarting signal-cli', {
+            hoursSinceGroupMsg: hoursSinceGroupMsg.toFixed(1),
+            hoursSinceRestart: hoursSinceRestart.toFixed(1),
+          });
+          try {
+            lastSignalCliRestart = Date.now();
+            lastGroupDataMessage = Date.now();
+            execSync('systemctl --user restart signal-cli', { timeout: 15000 });
+            log.info('signal-cli restarted by watchdog');
+          } catch (err) {
+            log.error('Watchdog failed to restart signal-cli', { err });
+            reportError('signal-cli-watchdog', 'Failed to restart signal-cli via watchdog');
+          }
+        }
+      },
+      5 * 60 * 1000,
+    );
   }
 
   const adapter: ChannelAdapter = {

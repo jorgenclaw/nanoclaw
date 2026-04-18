@@ -63,7 +63,10 @@ export function startCredentialProxy(port: number, host = '127.0.0.1'): Promise<
 
         upstream.on('error', (err) => {
           log.error('Credential proxy upstream error', { err, url: req.url });
-          if (!res.headersSent) { res.writeHead(502); res.end('Bad Gateway'); }
+          if (!res.headersSent) {
+            res.writeHead(502);
+            res.end('Bad Gateway');
+          }
         });
 
         upstream.write(body);

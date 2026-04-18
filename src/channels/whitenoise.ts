@@ -4,20 +4,10 @@ import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 
-import {
-  WN_BINARY_PATH,
-  WN_SOCKET_PATH,
-  WN_ACCOUNT_PUBKEY,
-} from '../config.js';
+import { WN_BINARY_PATH, WN_SOCKET_PATH, WN_ACCOUNT_PUBKEY } from '../config.js';
 import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
-import type {
-  ChannelAdapter,
-  ChannelRegistration,
-  ChannelSetup,
-  InboundMessage,
-  OutboundMessage,
-} from './adapter.js';
+import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 const execFileAsync = promisify(execFile);
@@ -39,7 +29,11 @@ function createWhiteNoiseAdapter(): ChannelAdapter | null {
 
   async function runWn(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync(WN_BINARY_PATH, [
-      '--json', '--socket', WN_SOCKET_PATH, '--account', WN_ACCOUNT_PUBKEY,
+      '--json',
+      '--socket',
+      WN_SOCKET_PATH,
+      '--account',
+      WN_ACCOUNT_PUBKEY,
       ...args,
     ]);
     return stdout;
@@ -69,7 +63,11 @@ function createWhiteNoiseAdapter(): ChannelAdapter | null {
   async function pollGroup(platformId: string): Promise<void> {
     const stdout = await runWn(['messages', 'list', platformId]);
     let parsed: { result?: Array<Record<string, unknown>> };
-    try { parsed = JSON.parse(stdout); } catch { return; }
+    try {
+      parsed = JSON.parse(stdout);
+    } catch {
+      return;
+    }
 
     const messages = parsed.result;
     if (!messages || !Array.isArray(messages) || messages.length === 0) return;
@@ -182,7 +180,10 @@ function createWhiteNoiseAdapter(): ChannelAdapter | null {
     },
 
     async teardown(): Promise<void> {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
       connected = false;
     },
 
@@ -254,10 +255,26 @@ const registration: ChannelRegistration = {
   factory: createWhiteNoiseAdapter,
   containerConfig: {
     mounts: [
-      { hostPath: path.join(os.homedir(), '.local', 'share', 'whitenoise-cli', 'release', 'wnd.sock'), containerPath: '/run/whitenoise/wnd.sock', readonly: false },
-      { hostPath: path.join(os.homedir(), '.local', 'share', 'whitenoise-cli', 'release', 'media_cache'), containerPath: '/run/whitenoise/media_cache', readonly: true },
-      { hostPath: path.join(os.homedir(), 'whitenoise-rs', 'target', 'release', 'wn'), containerPath: '/usr/local/bin/wn', readonly: true },
-      { hostPath: path.join(os.homedir(), 'whitenoise-rs', 'target', 'release', 'wnd'), containerPath: '/usr/local/bin/wnd', readonly: true },
+      {
+        hostPath: path.join(os.homedir(), '.local', 'share', 'whitenoise-cli', 'release', 'wnd.sock'),
+        containerPath: '/run/whitenoise/wnd.sock',
+        readonly: false,
+      },
+      {
+        hostPath: path.join(os.homedir(), '.local', 'share', 'whitenoise-cli', 'release', 'media_cache'),
+        containerPath: '/run/whitenoise/media_cache',
+        readonly: true,
+      },
+      {
+        hostPath: path.join(os.homedir(), 'whitenoise-rs', 'target', 'release', 'wn'),
+        containerPath: '/usr/local/bin/wn',
+        readonly: true,
+      },
+      {
+        hostPath: path.join(os.homedir(), 'whitenoise-rs', 'target', 'release', 'wnd'),
+        containerPath: '/usr/local/bin/wnd',
+        readonly: true,
+      },
     ],
   },
 };

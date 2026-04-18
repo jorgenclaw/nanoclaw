@@ -16,13 +16,7 @@ import {
 } from '../config.js';
 import { log } from '../log.js';
 import { transcribeAudio } from '../transcription.js';
-import type {
-  ChannelAdapter,
-  ChannelRegistration,
-  ChannelSetup,
-  InboundMessage,
-  OutboundMessage,
-} from './adapter.js';
+import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { getChannelAdapter, registerChannelAdapter } from './channel-registry.js';
 
 const WATCH_UPLOADS_DIR = path.join(STORE_DIR, 'watch-uploads');
@@ -37,7 +31,10 @@ interface PendingResolver {
   timer: ReturnType<typeof setTimeout>;
 }
 
-interface QueuedReply { ts: number; text: string }
+interface QueuedReply {
+  ts: number;
+  text: string;
+}
 
 export interface WatchNotification {
   id: string;
@@ -73,10 +70,12 @@ function createWatchAdapter(): ChannelAdapter | null {
     if (!WATCH_SIGNAL_MIRROR_JID) return;
     const signalAdapter = getChannelAdapter('signal');
     if (!signalAdapter) return;
-    signalAdapter.deliver(WATCH_SIGNAL_MIRROR_JID, null, {
-      kind: 'text',
-      content: { text },
-    }).catch((err) => log.warn('watch: signal mirror send failed', { err }));
+    signalAdapter
+      .deliver(WATCH_SIGNAL_MIRROR_JID, null, {
+        kind: 'text',
+        content: { text },
+      })
+      .catch((err) => log.warn('watch: signal mirror send failed', { err }));
   }
 
   function checkAuth(req: http.IncomingMessage): boolean {
@@ -94,7 +93,11 @@ function createWatchAdapter(): ChannelAdapter | null {
       let total = 0;
       req.on('data', (chunk: Buffer) => {
         total += chunk.length;
-        if (total > MAX_UPLOAD_BYTES) { reject(new Error('body too large')); req.destroy(); return; }
+        if (total > MAX_UPLOAD_BYTES) {
+          reject(new Error('body too large'));
+          req.destroy();
+          return;
+        }
         chunks.push(chunk);
       });
       req.on('end', () => resolve(Buffer.concat(chunks)));
@@ -104,7 +107,11 @@ function createWatchAdapter(): ChannelAdapter | null {
 
   function sendJson(res: http.ServerResponse, status: number, body: Record<string, unknown>): void {
     const buf = Buffer.from(JSON.stringify(body), 'utf-8');
-    res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': String(buf.length), Connection: 'close' });
+    res.writeHead(status, {
+      'Content-Type': 'application/json',
+      'Content-Length': String(buf.length),
+      Connection: 'close',
+    });
     res.end(buf);
   }
 
@@ -174,17 +181,25 @@ function createWatchAdapter(): ChannelAdapter | null {
         const body = await readBody(req);
         const parsed = JSON.parse(body.toString('utf-8')) as { text?: unknown };
         if (typeof parsed.text !== 'string' || !parsed.text.trim()) {
-          sendJson(res, 400, { error: 'missing text field' }); return;
+          sendJson(res, 400, { error: 'missing text field' });
+          return;
         }
         text = parsed.text.trim();
       } else if (ct.includes('audio/')) {
         const body = await readBody(req);
-        if (body.length === 0) { sendJson(res, 400, { error: 'empty audio body' }); return; }
+        if (body.length === 0) {
+          sendJson(res, 400, { error: 'empty audio body' });
+          return;
+        }
         const cleaned = await transcribeAndClean(body);
-        if (!cleaned) { sendJson(res, 200, { reply: '(no speech detected)' }); return; }
+        if (!cleaned) {
+          sendJson(res, 200, { reply: '(no speech detected)' });
+          return;
+        }
         text = cleaned;
       } else {
-        sendJson(res, 415, { error: `unsupported Content-Type: ${ct}` }); return;
+        sendJson(res, 415, { error: `unsupported Content-Type: ${ct}` });
+        return;
       }
     } catch (err) {
       log.warn('watch: bad inbound body', { err, ct });
@@ -201,11 +216,20 @@ function createWatchAdapter(): ChannelAdapter | null {
   async function handleMemoPost(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
       const ct = String(req.headers['content-type'] || '').toLowerCase();
-      if (!ct.includes('audio/')) { sendJson(res, 415, { error: `unsupported Content-Type: ${ct}` }); return; }
+      if (!ct.includes('audio/')) {
+        sendJson(res, 415, { error: `unsupported Content-Type: ${ct}` });
+        return;
+      }
       const body = await readBody(req);
-      if (body.length === 0) { sendJson(res, 400, { error: 'empty audio body' }); return; }
+      if (body.length === 0) {
+        sendJson(res, 400, { error: 'empty audio body' });
+        return;
+      }
       const cleaned = await transcribeAndClean(body);
-      if (!cleaned) { sendJson(res, 200, { reply: '(no speech detected)' }); return; }
+      if (!cleaned) {
+        sendJson(res, 200, { reply: '(no speech detected)' });
+        return;
+      }
 
       const now = new Date();
       const dateStr = now.toISOString().slice(0, 10);
@@ -228,11 +252,20 @@ function createWatchAdapter(): ChannelAdapter | null {
   async function handleReminderPost(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
       const ct = String(req.headers['content-type'] || '').toLowerCase();
-      if (!ct.includes('audio/')) { sendJson(res, 415, { error: `unsupported Content-Type: ${ct}` }); return; }
+      if (!ct.includes('audio/')) {
+        sendJson(res, 415, { error: `unsupported Content-Type: ${ct}` });
+        return;
+      }
       const body = await readBody(req);
-      if (body.length === 0) { sendJson(res, 400, { error: 'empty audio body' }); return; }
+      if (body.length === 0) {
+        sendJson(res, 400, { error: 'empty audio body' });
+        return;
+      }
       const cleaned = await transcribeAndClean(body);
-      if (!cleaned) { sendJson(res, 200, { reply: '(no speech detected)' }); return; }
+      if (!cleaned) {
+        sendJson(res, 200, { reply: '(no speech detected)' });
+        return;
+      }
 
       const deviceId = (req.headers['x-device-id'] as string | undefined) || 'unknown';
       log.info('watch: reminder request — routing to agent', { deviceId, preview: cleaned.slice(0, 100) });
@@ -256,7 +289,10 @@ function createWatchAdapter(): ChannelAdapter | null {
 
   async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-    if (!checkAuth(req)) { sendJson(res, 401, { error: 'unauthorized' }); return; }
+    if (!checkAuth(req)) {
+      sendJson(res, 401, { error: 'unauthorized' });
+      return;
+    }
 
     if (req.method === 'POST' && url.pathname === '/api/watch/notify') {
       try {
@@ -265,16 +301,30 @@ function createWatchAdapter(): ChannelAdapter | null {
         const type = (parsed.type === 'email' ? 'email' : 'signal') as 'email' | 'signal';
         const from = parsed.from || 'System';
         const text = parsed.text || '';
-        if (!text) { sendJson(res, 400, { error: 'missing text field' }); return; }
+        if (!text) {
+          sendJson(res, 400, { error: 'missing text field' });
+          return;
+        }
         addNotification(type, from, text);
         sendJson(res, 200, { ok: true });
-      } catch { sendJson(res, 400, { error: 'bad request' }); }
+      } catch {
+        sendJson(res, 400, { error: 'bad request' });
+      }
       return;
     }
 
-    if (req.method === 'POST' && url.pathname === '/api/watch/message') { await handleMessagePost(req, res); return; }
-    if (req.method === 'POST' && url.pathname === '/api/watch/memo') { await handleMemoPost(req, res); return; }
-    if (req.method === 'POST' && url.pathname === '/api/watch/reminder') { await handleReminderPost(req, res); return; }
+    if (req.method === 'POST' && url.pathname === '/api/watch/message') {
+      await handleMessagePost(req, res);
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/watch/memo') {
+      await handleMemoPost(req, res);
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/watch/reminder') {
+      await handleReminderPost(req, res);
+      return;
+    }
 
     if (req.method === 'GET' && url.pathname === '/api/watch/poll') {
       const next = pollQueue.shift();
@@ -294,9 +344,8 @@ function createWatchAdapter(): ChannelAdapter | null {
 
   function addNotification(type: 'email' | 'signal', from: string, fullText: string): void {
     const normalized = normalizeForWatch(fullText);
-    const preview = normalized.length > NOTIF_PREVIEW_LEN
-      ? normalized.slice(0, NOTIF_PREVIEW_LEN - 3) + '...'
-      : normalized;
+    const preview =
+      normalized.length > NOTIF_PREVIEW_LEN ? normalized.slice(0, NOTIF_PREVIEW_LEN - 3) + '...' : normalized;
     notificationQueue.push({
       id: `notif-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
       type,
@@ -327,7 +376,10 @@ function createWatchAdapter(): ChannelAdapter | null {
       });
 
       await new Promise<void>((resolve, reject) => {
-        const onError = (err: Error) => { server?.removeListener('error', onError); reject(err); };
+        const onError = (err: Error) => {
+          server?.removeListener('error', onError);
+          reject(err);
+        };
         server!.once('error', onError);
         server!.listen(WATCH_HTTP_PORT, WATCH_HTTP_BIND, () => {
           server!.removeListener('error', onError);
@@ -338,7 +390,10 @@ function createWatchAdapter(): ChannelAdapter | null {
     },
 
     async teardown(): Promise<void> {
-      for (const r of pendingResolvers) { clearTimeout(r.timer); r.resolve(''); }
+      for (const r of pendingResolvers) {
+        clearTimeout(r.timer);
+        r.resolve('');
+      }
       pendingResolvers = [];
       if (server) {
         await new Promise<void>((resolve) => server!.close(() => resolve()));

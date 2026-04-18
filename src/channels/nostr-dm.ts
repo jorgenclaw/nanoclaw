@@ -6,21 +6,10 @@ import { connect } from 'net';
 import WebSocket from 'ws';
 import { useWebSocketImplementation, SimplePool } from 'nostr-tools/pool';
 
-import {
-  GROUPS_DIR,
-  NOSTR_DM_ALLOWLIST,
-  NOSTR_DM_RELAYS,
-  NOSTR_SIGNER_SOCKET,
-} from '../config.js';
+import { GROUPS_DIR, NOSTR_DM_ALLOWLIST, NOSTR_DM_RELAYS, NOSTR_SIGNER_SOCKET } from '../config.js';
 import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
-import type {
-  ChannelAdapter,
-  ChannelRegistration,
-  ChannelSetup,
-  InboundMessage,
-  OutboundMessage,
-} from './adapter.js';
+import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 interface NostrEvent {
@@ -46,11 +35,19 @@ function daemonRequest(payload: object): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const sock = connect(NOSTR_SIGNER_SOCKET);
     let data = '';
-    sock.on('connect', () => { sock.write(JSON.stringify(payload)); sock.end(); });
-    sock.on('data', (chunk) => { data += chunk; });
+    sock.on('connect', () => {
+      sock.write(JSON.stringify(payload));
+      sock.end();
+    });
+    sock.on('data', (chunk) => {
+      data += chunk;
+    });
     sock.on('end', () => {
-      try { resolve(JSON.parse(data)); }
-      catch { reject(new Error(`Bad response from signer: ${data}`)); }
+      try {
+        resolve(JSON.parse(data));
+      } catch {
+        reject(new Error(`Bad response from signer: ${data}`));
+      }
     });
     sock.on('error', (err) => {
       sock.destroy();
@@ -107,7 +104,10 @@ function createNostrDMAdapter(): ChannelAdapter | null {
     let rumor: Rumor;
     try {
       const res = await daemonRequest({ method: 'unwrap_gift_wrap', params: { event } });
-      if (res.error) { log.warn('Failed to unwrap gift wrap', { error: res.error }); return; }
+      if (res.error) {
+        log.warn('Failed to unwrap gift wrap', { error: res.error });
+        return;
+      }
       rumor = res.rumor as Rumor;
     } catch (err) {
       log.warn('Daemon unwrap request failed', { err });
@@ -210,10 +210,16 @@ function createNostrDMAdapter(): ChannelAdapter | null {
 
     try {
       const res = await fetch(url);
-      if (!res.ok) { log.warn('Failed to download Nostr attachment', { url, status: res.status }); return null; }
+      if (!res.ok) {
+        log.warn('Failed to download Nostr attachment', { url, status: res.status });
+        return null;
+      }
       const encrypted = Buffer.from(await res.arrayBuffer());
 
-      if (algo !== 'aes-gcm') { log.warn('Unsupported encryption algorithm', { algo }); return null; }
+      if (algo !== 'aes-gcm') {
+        log.warn('Unsupported encryption algorithm', { algo });
+        return null;
+      }
 
       const key = Buffer.from(keyHex, 'hex');
       const nonce = Buffer.from(nonceHex, 'hex');
@@ -236,7 +242,10 @@ function createNostrDMAdapter(): ChannelAdapter | null {
     if (reconnectTimer) return;
     reconnectAttempts++;
     if (reconnectAttempts === 3) {
-      reportError('nostr-dm-disconnect', `Nostr DM relay connections lost. Failed to reconnect ${reconnectAttempts} times.`);
+      reportError(
+        'nostr-dm-disconnect',
+        `Nostr DM relay connections lost. Failed to reconnect ${reconnectAttempts} times.`,
+      );
     }
     const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 60000);
     reconnectTimer = setTimeout(() => {
@@ -262,7 +271,10 @@ function createNostrDMAdapter(): ChannelAdapter | null {
     while (outgoingQueue.length > 0) {
       const item = outgoingQueue.shift()!;
       try {
-        const res = await daemonRequest({ method: 'wrap_dm', params: { recipientPubkey: item.platformId, message: item.text } });
+        const res = await daemonRequest({
+          method: 'wrap_dm',
+          params: { recipientPubkey: item.platformId, message: item.text },
+        });
         if (res.error) throw new Error(res.error as string);
         const events = res.events as NostrEvent[];
         await Promise.all(events.map((ev) => pool!.publish(NOSTR_DM_RELAYS, ev)));
@@ -290,14 +302,21 @@ function createNostrDMAdapter(): ChannelAdapter | null {
       connected = true;
       reconnectAttempts = 0;
       clearAlert('nostr-dm-disconnect');
-      log.info('Nostr DM channel connected', { pubkey: ownPubkey, relays: NOSTR_DM_RELAYS.length, allowlist: NOSTR_DM_ALLOWLIST.size });
+      log.info('Nostr DM channel connected', {
+        pubkey: ownPubkey,
+        relays: NOSTR_DM_RELAYS.length,
+        allowlist: NOSTR_DM_ALLOWLIST.size,
+      });
 
       flushOutgoingQueue().catch((err) => log.error('Failed to flush Nostr DM outgoing queue', { err }));
     },
 
     async teardown(): Promise<void> {
       connected = false;
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       subCloser?.close();
       pool?.close(NOSTR_DM_RELAYS);
       pool = null;
@@ -341,9 +360,7 @@ function createNostrDMAdapter(): ChannelAdapter | null {
 const registration: ChannelRegistration = {
   factory: createNostrDMAdapter,
   containerConfig: {
-    mounts: [
-      { hostPath: '/run/nostr/signer.sock', containerPath: '/run/nostr/signer.sock', readonly: false },
-    ],
+    mounts: [{ hostPath: '/run/nostr/signer.sock', containerPath: '/run/nostr/signer.sock', readonly: false }],
   },
 };
 

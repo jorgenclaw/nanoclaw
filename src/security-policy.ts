@@ -168,44 +168,25 @@ export function loadSecurityPolicy(pathOverride?: string): SecurityPolicy {
   // Trust — owner_ids replaces (not appends) since these are identities
   const trust = obj.trust as Record<string, unknown> | undefined;
   if (trust?.owner_ids && Array.isArray(trust.owner_ids)) {
-    policy.trust.owner_ids = trust.owner_ids.filter(
-      (v): v is string => typeof v === 'string',
-    );
+    policy.trust.owner_ids = trust.owner_ids.filter((v): v is string => typeof v === 'string');
   }
   if (trust?.trusted_members && Array.isArray(trust.trusted_members)) {
-    policy.trust.trusted_members = trust.trusted_members.filter(
-      (v): v is string => typeof v === 'string',
-    );
+    policy.trust.trusted_members = trust.trusted_members.filter((v): v is string => typeof v === 'string');
   }
 
   // Tools
   const tools = obj.tools as Record<string, unknown> | undefined;
   if (tools) {
-    policy.tools.blocked = mergeStringArrays(
-      policy.tools.blocked,
-      tools.blocked,
-    );
-    policy.tools.blocked_untrusted = mergeStringArrays(
-      policy.tools.blocked_untrusted,
-      tools.blocked_untrusted,
-    );
+    policy.tools.blocked = mergeStringArrays(policy.tools.blocked, tools.blocked);
+    policy.tools.blocked_untrusted = mergeStringArrays(policy.tools.blocked_untrusted, tools.blocked_untrusted);
   }
 
   // Bash
   const bash = obj.bash as Record<string, unknown> | undefined;
   if (bash) {
-    policy.bash.blocked_patterns = mergeStringArrays(
-      policy.bash.blocked_patterns,
-      bash.blocked_patterns,
-    );
-    policy.bash.blocked_env_vars = mergeStringArrays(
-      policy.bash.blocked_env_vars,
-      bash.blocked_env_vars,
-    );
-    policy.bash.blocked_url_patterns = mergeStringArrays(
-      policy.bash.blocked_url_patterns,
-      bash.blocked_url_patterns,
-    );
+    policy.bash.blocked_patterns = mergeStringArrays(policy.bash.blocked_patterns, bash.blocked_patterns);
+    policy.bash.blocked_env_vars = mergeStringArrays(policy.bash.blocked_env_vars, bash.blocked_env_vars);
+    policy.bash.blocked_url_patterns = mergeStringArrays(policy.bash.blocked_url_patterns, bash.blocked_url_patterns);
   }
 
   // WebFetch
@@ -214,10 +195,7 @@ export function loadSecurityPolicy(pathOverride?: string): SecurityPolicy {
     if (typeof webfetch.https_only === 'boolean') {
       policy.webfetch.https_only = webfetch.https_only;
     }
-    policy.webfetch.blocked_networks = mergeStringArrays(
-      policy.webfetch.blocked_networks,
-      webfetch.blocked_networks,
-    );
+    policy.webfetch.blocked_networks = mergeStringArrays(policy.webfetch.blocked_networks, webfetch.blocked_networks);
     policy.webfetch.blocked_url_patterns = mergeStringArrays(
       policy.webfetch.blocked_url_patterns,
       webfetch.blocked_url_patterns,
@@ -230,10 +208,7 @@ export function loadSecurityPolicy(pathOverride?: string): SecurityPolicy {
   // Write
   const write = obj.write as Record<string, unknown> | undefined;
   if (write) {
-    policy.write.blocked_paths = mergeStringArrays(
-      policy.write.blocked_paths,
-      write.blocked_paths,
-    );
+    policy.write.blocked_paths = mergeStringArrays(policy.write.blocked_paths, write.blocked_paths);
     policy.write.trust_required_paths = mergeStringArrays(
       policy.write.trust_required_paths,
       write.trust_required_paths,
@@ -243,10 +218,7 @@ export function loadSecurityPolicy(pathOverride?: string): SecurityPolicy {
   // Mounts
   const mounts = obj.mounts as Record<string, unknown> | undefined;
   if (mounts) {
-    policy.mounts.readonly_overlays = mergeStringArrays(
-      policy.mounts.readonly_overlays,
-      mounts.readonly_overlays,
-    );
+    policy.mounts.readonly_overlays = mergeStringArrays(policy.mounts.readonly_overlays, mounts.readonly_overlays);
   }
 
   // Killswitch
@@ -265,41 +237,23 @@ export function loadSecurityPolicy(pathOverride?: string): SecurityPolicy {
 
   // Validate all regex patterns at load time (fail-fast)
   validateRegexes(policy.bash.blocked_patterns, 'bash.blocked_patterns');
-  validateRegexes(
-    policy.bash.blocked_url_patterns,
-    'bash.blocked_url_patterns',
-  );
-  validateRegexes(
-    policy.webfetch.blocked_networks,
-    'webfetch.blocked_networks',
-  );
-  validateRegexes(
-    policy.webfetch.blocked_url_patterns,
-    'webfetch.blocked_url_patterns',
-  );
+  validateRegexes(policy.bash.blocked_url_patterns, 'bash.blocked_url_patterns');
+  validateRegexes(policy.webfetch.blocked_networks, 'webfetch.blocked_networks');
+  validateRegexes(policy.webfetch.blocked_url_patterns, 'webfetch.blocked_url_patterns');
   validateRegexes(policy.write.blocked_paths, 'write.blocked_paths');
-  validateRegexes(
-    policy.write.trust_required_paths,
-    'write.trust_required_paths',
-  );
+  validateRegexes(policy.write.trust_required_paths, 'write.trust_required_paths');
 
   return policy;
 }
 
 // --- Helpers ---
 
-export function isSenderTrusted(
-  policy: SecurityPolicy,
-  senderId: string,
-): boolean {
+export function isSenderTrusted(policy: SecurityPolicy, senderId: string): boolean {
   if (policy.trust.owner_ids.length === 0) return false;
   return policy.trust.owner_ids.includes(senderId);
 }
 
-export function readKillswitch(
-  policy: SecurityPolicy,
-  groupFolder: string,
-): { canRun: boolean; message: string } {
+export function readKillswitch(policy: SecurityPolicy, groupFolder: string): { canRun: boolean; message: string } {
   const groupDir = resolveGroupFolderPath(groupFolder);
   const ksPath = path.join(groupDir, 'data', policy.killswitch.file);
 
@@ -347,9 +301,7 @@ export function buildAllowedTools(policy: SecurityPolicy): string[] {
   return all.filter((t) => !blocked.has(t));
 }
 
-export function buildContainerSecurityRules(
-  policy: SecurityPolicy,
-): ContainerSecurityRules {
+export function buildContainerSecurityRules(policy: SecurityPolicy): ContainerSecurityRules {
   return {
     bash: {
       blocked: policy.bash.blocked_patterns,
@@ -378,10 +330,7 @@ interface VolumeMount {
   readonly: boolean;
 }
 
-export function buildReadonlyOverlays(
-  policy: SecurityPolicy,
-  groupDir: string,
-): VolumeMount[] {
+export function buildReadonlyOverlays(policy: SecurityPolicy, groupDir: string): VolumeMount[] {
   const mounts: VolumeMount[] = [];
 
   for (const overlay of policy.mounts.readonly_overlays) {

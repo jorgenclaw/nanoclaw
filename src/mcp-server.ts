@@ -132,10 +132,7 @@ async function isFreeTierCall(nip05?: string): Promise<boolean> {
   const count = await getUsageCount(nip05);
   if (count >= FREE_TIER_LIMIT) return false;
   await incrementUsage(nip05);
-  logger.info(
-    { nip05, count: count + 1, limit: FREE_TIER_LIMIT },
-    'Free tier call',
-  );
+  logger.info({ nip05, count: count + 1, limit: FREE_TIER_LIMIT }, 'Free tier call');
   return true;
 }
 
@@ -155,57 +152,28 @@ const mcpEnv = readEnvFile([
   'TOOL_PRICE_VERIFY_RECEIPT',
 ]);
 
-const MCP_SERVER_PORT = parseInt(
-  process.env.MCP_SERVER_PORT || mcpEnv.MCP_SERVER_PORT || '3002',
-  10,
-);
-const MCP_SERVER_NAME =
-  process.env.MCP_SERVER_NAME ||
-  mcpEnv.MCP_SERVER_NAME ||
-  'Jorgenclaw Sovereign MCP';
+const MCP_SERVER_PORT = parseInt(process.env.MCP_SERVER_PORT || mcpEnv.MCP_SERVER_PORT || '3002', 10);
+const MCP_SERVER_NAME = process.env.MCP_SERVER_NAME || mcpEnv.MCP_SERVER_NAME || 'Jorgenclaw Sovereign MCP';
 // Pricing tiers: 5 sats (reads), 21 sats (sign/publish), 50 sats (zaps)
-const TOOL_PRICE_SIGN = parseInt(
-  process.env.TOOL_PRICE_SIGN || mcpEnv.TOOL_PRICE_SIGN || '21',
-  10,
-);
-const TOOL_PRICE_PUBLISH = parseInt(
-  process.env.TOOL_PRICE_PUBLISH || mcpEnv.TOOL_PRICE_PUBLISH || '21',
-  10,
-);
-const TOOL_PRICE_POST_NOTE = parseInt(
-  process.env.TOOL_PRICE_POST_NOTE || mcpEnv.TOOL_PRICE_POST_NOTE || '21',
-  10,
-);
+const TOOL_PRICE_SIGN = parseInt(process.env.TOOL_PRICE_SIGN || mcpEnv.TOOL_PRICE_SIGN || '21', 10);
+const TOOL_PRICE_PUBLISH = parseInt(process.env.TOOL_PRICE_PUBLISH || mcpEnv.TOOL_PRICE_PUBLISH || '21', 10);
+const TOOL_PRICE_POST_NOTE = parseInt(process.env.TOOL_PRICE_POST_NOTE || mcpEnv.TOOL_PRICE_POST_NOTE || '21', 10);
 const TOOL_PRICE_FETCH_PROFILE = parseInt(
-  process.env.TOOL_PRICE_FETCH_PROFILE ||
-    mcpEnv.TOOL_PRICE_FETCH_PROFILE ||
-    '5',
+  process.env.TOOL_PRICE_FETCH_PROFILE || mcpEnv.TOOL_PRICE_FETCH_PROFILE || '5',
   10,
 );
-const TOOL_PRICE_ZAP = parseInt(
-  process.env.TOOL_PRICE_ZAP || mcpEnv.TOOL_PRICE_ZAP || '50',
-  10,
-);
-const TOOL_PRICE_GET_NOTES = parseInt(
-  process.env.TOOL_PRICE_GET_NOTES || mcpEnv.TOOL_PRICE_GET_NOTES || '5',
-  10,
-);
+const TOOL_PRICE_ZAP = parseInt(process.env.TOOL_PRICE_ZAP || mcpEnv.TOOL_PRICE_ZAP || '50', 10);
+const TOOL_PRICE_GET_NOTES = parseInt(process.env.TOOL_PRICE_GET_NOTES || mcpEnv.TOOL_PRICE_GET_NOTES || '5', 10);
 const TOOL_PRICE_CREATE_INVOICE = parseInt(
-  process.env.TOOL_PRICE_CREATE_INVOICE ||
-    mcpEnv.TOOL_PRICE_CREATE_INVOICE ||
-    '5',
+  process.env.TOOL_PRICE_CREATE_INVOICE || mcpEnv.TOOL_PRICE_CREATE_INVOICE || '5',
   10,
 );
 const TOOL_PRICE_ACTION_RECEIPT = parseInt(
-  process.env.TOOL_PRICE_ACTION_RECEIPT ||
-    mcpEnv.TOOL_PRICE_ACTION_RECEIPT ||
-    '21',
+  process.env.TOOL_PRICE_ACTION_RECEIPT || mcpEnv.TOOL_PRICE_ACTION_RECEIPT || '21',
   10,
 );
 const TOOL_PRICE_VERIFY_RECEIPT = parseInt(
-  process.env.TOOL_PRICE_VERIFY_RECEIPT ||
-    mcpEnv.TOOL_PRICE_VERIFY_RECEIPT ||
-    '5',
+  process.env.TOOL_PRICE_VERIFY_RECEIPT || mcpEnv.TOOL_PRICE_VERIFY_RECEIPT || '5',
   10,
 );
 
@@ -214,25 +182,16 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const walletScript = path.join(projectRoot, 'tools/nwc-wallet/index.js');
-const NWC_CONFIG_PATH =
-  process.env.NWC_CONFIG ||
-  path.join(projectRoot, 'groups/main/config/nwc.json');
-const NWC_SPENDING_PATH =
-  process.env.NWC_SPENDING ||
-  path.join(projectRoot, 'groups/main/config/mcp-spending.json');
-const DEFAULT_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.primal.net',
-];
+const NWC_CONFIG_PATH = process.env.NWC_CONFIG || path.join(projectRoot, 'groups/main/config/nwc.json');
+const NWC_SPENDING_PATH = process.env.NWC_SPENDING || path.join(projectRoot, 'groups/main/config/mcp-spending.json');
+const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
 const ATTESTATION_RELAYS = [
   'wss://relay.damus.io',
   'wss://nos.lol',
   'wss://relay.nostr.band',
   'wss://relay.primal.net',
 ];
-const OUR_PUBKEY =
-  'd0514175a31de1942812597ee4e3f478b183f7f35fb73ee66d8c9f57485544e4';
+const OUR_PUBKEY = 'd0514175a31de1942812597ee4e3f478b183f7f35fb73ee66d8c9f57485544e4';
 
 // --- Signing daemon ---
 
@@ -254,18 +213,13 @@ function daemonRequest(payload: object): Promise<Record<string, unknown>> {
         reject(new Error(`Bad response from signer: ${data}`));
       }
     });
-    sock.on('error', (err) =>
-      reject(new Error(`Cannot connect to signing daemon: ${err.message}`)),
-    );
+    sock.on('error', (err) => reject(new Error(`Cannot connect to signing daemon: ${err.message}`)));
   });
 }
 
 // --- Invoice helper ---
 
-function generateInvoice(
-  amountSats: number,
-  description: string,
-): string | null {
+function generateInvoice(amountSats: number, description: string): string | null {
   try {
     const result = execSync(
       `${process.execPath} ${walletScript} invoice ${amountSats} "${description.replace(/"/g, '\\"')}"`,
@@ -293,10 +247,7 @@ function verifyPreimage(preimage: string): boolean {
 
 // --- Relay publishing ---
 
-async function publishToRelays(
-  event: Record<string, unknown>,
-  relays: string[],
-): Promise<string[]> {
+async function publishToRelays(event: Record<string, unknown>, relays: string[]): Promise<string[]> {
   const results: string[] = [];
   const { default: WebSocket } = await import('ws');
   const promises = relays.map(async (url) => {
@@ -310,10 +261,7 @@ async function publishToRelays(
         ws.on('open', () => ws.send(JSON.stringify(['EVENT', event])));
         ws.on('message', (msg: Buffer) => {
           const parsed = JSON.parse(msg.toString());
-          if (
-            parsed[0] === 'OK' &&
-            parsed[1] === (event as { id?: string }).id
-          ) {
+          if (parsed[0] === 'OK' && parsed[1] === (event as { id?: string }).id) {
             clearTimeout(timeout);
             if (parsed[2]) results.push(url);
             ws.close();
@@ -337,10 +285,7 @@ async function publishToRelays(
 
 const QUERY_RELAYS = ['wss://nos.lol', 'wss://relay.nostr.band'];
 
-async function queryRelays(
-  filter: Record<string, unknown>,
-  limit: number = 20,
-): Promise<Record<string, unknown>[]> {
+async function queryRelays(filter: Record<string, unknown>, limit: number = 20): Promise<Record<string, unknown>[]> {
   const { default: WebSocket } = await import('ws');
   const events: Record<string, unknown>[] = [];
   const seenIds = new Set<string>();
@@ -354,9 +299,7 @@ async function queryRelays(
           ws.close();
           resolve();
         }, 8000);
-        ws.on('open', () =>
-          ws.send(JSON.stringify(['REQ', subId, { ...filter, limit }])),
-        );
+        ws.on('open', () => ws.send(JSON.stringify(['REQ', subId, { ...filter, limit }])));
         ws.on('message', (msg: Buffer) => {
           const parsed = JSON.parse(msg.toString());
           if (parsed[0] === 'EVENT' && parsed[2]) {
@@ -433,8 +376,7 @@ function paymentRequiredResponse(bolt11: string, amountSats: number) {
           status: 'payment_required',
           invoice: bolt11,
           amount_sats: amountSats,
-          message:
-            'Pay this Lightning invoice, then retry with payment_preimage parameter.',
+          message: 'Pay this Lightning invoice, then retry with payment_preimage parameter.',
         }),
       },
     ],
@@ -461,15 +403,11 @@ function registerTools(server: McpServer): void {
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z
         .string()
         .optional()
-        .describe(
-          'Lightning payment preimage (64 hex chars) — provide after paying the invoice',
-        ),
+        .describe('Lightning payment preimage (64 hex chars) — provide after paying the invoice'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
@@ -478,8 +416,7 @@ function registerTools(server: McpServer): void {
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_SIGN);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
         const result = await daemonRequest({
@@ -492,10 +429,7 @@ function registerTools(server: McpServer): void {
           },
         });
         if (result.error) return errorResponse(String(result.error));
-        logger.info(
-          { tool: 'nostr_sign_event', kind: args.kind },
-          'Paid tool call executed',
-        );
+        logger.info({ tool: 'nostr_sign_event', kind: args.kind }, 'Paid tool call executed');
         return {
           content: [
             {
@@ -519,35 +453,24 @@ function registerTools(server: McpServer): void {
       content: z.string().describe('Event content'),
       tags: z.array(z.array(z.string())).optional().describe('Event tags'),
       created_at: z.number().optional().describe('Unix timestamp'),
-      relays: z
-        .array(z.string())
-        .optional()
-        .describe('Relay URLs (defaults to popular relays)'),
+      relays: z.array(z.string()).optional().describe('Relay URLs (defaults to popular relays)'),
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z
         .string()
         .optional()
-        .describe(
-          'Lightning payment preimage (64 hex chars) — provide after paying the invoice',
-        ),
+        .describe('Lightning payment preimage (64 hex chars) — provide after paying the invoice'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
-        const bolt11 = generateInvoice(
-          TOOL_PRICE_PUBLISH,
-          'nostr_publish_event',
-        );
+        const bolt11 = generateInvoice(TOOL_PRICE_PUBLISH, 'nostr_publish_event');
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_PUBLISH);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
         const result = await daemonRequest({
@@ -564,8 +487,7 @@ function registerTools(server: McpServer): void {
 
         const targetRelays = args.relays?.length ? args.relays : DEFAULT_RELAYS;
         const publishedTo = await publishToRelays(signedEvent, targetRelays);
-        if (publishedTo.length === 0)
-          return errorResponse('Failed to publish to any relay');
+        if (publishedTo.length === 0) return errorResponse('Failed to publish to any relay');
 
         logger.info(
           {
@@ -603,13 +525,8 @@ function registerTools(server: McpServer): void {
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
-      payment_preimage: z
-        .string()
-        .optional()
-        .describe('Lightning payment preimage (64 hex chars)'),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
+      payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
@@ -618,8 +535,7 @@ function registerTools(server: McpServer): void {
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_POST_NOTE);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
         const result = await daemonRequest({
@@ -630,13 +546,9 @@ function registerTools(server: McpServer): void {
         const signedEvent = result.event as Record<string, unknown>;
 
         const publishedTo = await publishToRelays(signedEvent, DEFAULT_RELAYS);
-        if (publishedTo.length === 0)
-          return errorResponse('Failed to publish to any relay');
+        if (publishedTo.length === 0) return errorResponse('Failed to publish to any relay');
 
-        logger.info(
-          { tool: 'nostr_post_note', relays: publishedTo.length },
-          'Paid tool call executed',
-        );
+        logger.info({ tool: 'nostr_post_note', relays: publishedTo.length }, 'Paid tool call executed');
         return {
           content: [
             {
@@ -663,26 +575,17 @@ function registerTools(server: McpServer): void {
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
-      payment_preimage: z
-        .string()
-        .optional()
-        .describe('Lightning payment preimage (64 hex chars)'),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
+      payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
-        const bolt11 = generateInvoice(
-          TOOL_PRICE_FETCH_PROFILE,
-          'nostr_fetch_profile',
-        );
+        const bolt11 = generateInvoice(TOOL_PRICE_FETCH_PROFILE, 'nostr_fetch_profile');
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_FETCH_PROFILE);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
         const hex = decodeNpub(args.pubkey);
@@ -690,10 +593,7 @@ function registerTools(server: McpServer): void {
         if (events.length === 0) return errorResponse('Profile not found');
 
         const content = JSON.parse((events[0] as { content: string }).content);
-        logger.info(
-          { tool: 'nostr_fetch_profile', pubkey: hex.slice(0, 16) },
-          'Paid tool call executed',
-        );
+        logger.info({ tool: 'nostr_fetch_profile', pubkey: hex.slice(0, 16) }, 'Paid tool call executed');
         return {
           content: [
             {
@@ -722,22 +622,13 @@ function registerTools(server: McpServer): void {
     `Zap a Nostr user via Lightning. Price: ${TOOL_PRICE_ZAP} sats (tool fee) + zap amount. Max 5000 sats.`,
     {
       npub: z.string().describe('Nostr npub or hex pubkey to zap'),
-      amount_sats: z
-        .number()
-        .min(1)
-        .max(5000)
-        .describe('Zap amount in sats (max 5000)'),
+      amount_sats: z.number().min(1).max(5000).describe('Zap amount in sats (max 5000)'),
       comment: z.string().optional().describe('Zap comment'),
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
-      payment_preimage: z
-        .string()
-        .optional()
-        .describe('Lightning payment preimage (64 hex chars)'),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
+      payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
@@ -746,8 +637,7 @@ function registerTools(server: McpServer): void {
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_ZAP);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
         const cmd = args.comment
@@ -758,10 +648,7 @@ function registerTools(server: McpServer): void {
 
         if (parsed.error) return errorResponse(parsed.error);
 
-        logger.info(
-          { tool: 'nostr_zap', amount: args.amount_sats },
-          'Paid tool call executed',
-        );
+        logger.info({ tool: 'nostr_zap', amount: args.amount_sats }, 'Paid tool call executed');
         return {
           content: [
             {
@@ -787,22 +674,12 @@ function registerTools(server: McpServer): void {
     {
       author: z.string().optional().describe('Author npub or hex pubkey'),
       hashtag: z.string().optional().describe('Hashtag to search (without #)'),
-      limit: z
-        .number()
-        .min(1)
-        .max(20)
-        .optional()
-        .describe('Max results (default 10, max 20)'),
+      limit: z.number().min(1).max(20).optional().describe('Max results (default 10, max 20)'),
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
-      payment_preimage: z
-        .string()
-        .optional()
-        .describe('Lightning payment preimage (64 hex chars)'),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
+      payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
@@ -811,10 +688,8 @@ function registerTools(server: McpServer): void {
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_GET_NOTES);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
-      if (!args.author && !args.hashtag)
-        return errorResponse('Provide author or hashtag (or both)');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
+      if (!args.author && !args.hashtag) return errorResponse('Provide author or hashtag (or both)');
 
       try {
         const filter: Record<string, unknown> = { kinds: [1] };
@@ -832,10 +707,7 @@ function registerTools(server: McpServer): void {
           tags: ev.tags,
         }));
 
-        logger.info(
-          { tool: 'nostr_get_notes', count: notes.length },
-          'Paid tool call executed',
-        );
+        logger.info({ tool: 'nostr_get_notes', count: notes.length }, 'Paid tool call executed');
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(notes) }],
         };
@@ -855,41 +727,26 @@ function registerTools(server: McpServer): void {
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
-      payment_preimage: z
-        .string()
-        .optional()
-        .describe('Lightning payment preimage (64 hex chars)'),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
+      payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
-        const bolt11 = generateInvoice(
-          TOOL_PRICE_CREATE_INVOICE,
-          'lightning_create_invoice',
-        );
+        const bolt11 = generateInvoice(TOOL_PRICE_CREATE_INVOICE, 'lightning_create_invoice');
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_CREATE_INVOICE);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
-        const desc = (args.description || 'NanoClaw invoice').replace(
-          /"/g,
-          '\\"',
-        );
+        const desc = (args.description || 'NanoClaw invoice').replace(/"/g, '\\"');
         const result = walletExec(`invoice ${args.amount_sats} "${desc}"`);
         const parsed = JSON.parse(result);
 
         if (!parsed.invoice) return errorResponse('Failed to create invoice');
 
-        logger.info(
-          { tool: 'lightning_create_invoice', amount: args.amount_sats },
-          'Paid tool call executed',
-        );
+        logger.info({ tool: 'lightning_create_invoice', amount: args.amount_sats }, 'Paid tool call executed');
         return {
           content: [
             {
@@ -913,40 +770,24 @@ function registerTools(server: McpServer): void {
     'create_action_receipt',
     `Create a signed action receipt (kind 1111) attesting an agent's action. Third-party attestation via Jorgenclaw's signing key. Price: ${TOOL_PRICE_ACTION_RECEIPT} sats.`,
     {
-      agent_id: z
-        .string()
-        .describe('Agent identifier (e.g. "myagent@example.com")'),
-      action: z
-        .string()
-        .describe('Action identifier (e.g. "posted_to_moltbook")'),
+      agent_id: z.string().describe('Agent identifier (e.g. "myagent@example.com")'),
+      action: z.string().describe('Action identifier (e.g. "posted_to_moltbook")'),
       summary: z.string().describe('Human-readable description of the action'),
-      metadata: z
-        .record(z.string(), z.string())
-        .optional()
-        .describe('Optional key-value pairs for additional context'),
+      metadata: z.record(z.string(), z.string()).optional().describe('Optional key-value pairs for additional context'),
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
-      payment_preimage: z
-        .string()
-        .optional()
-        .describe('Lightning payment preimage (64 hex chars)'),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
+      payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
-        const bolt11 = generateInvoice(
-          TOOL_PRICE_ACTION_RECEIPT,
-          'create_action_receipt',
-        );
+        const bolt11 = generateInvoice(TOOL_PRICE_ACTION_RECEIPT, 'create_action_receipt');
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_ACTION_RECEIPT);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
         const content = `Action receipt: ${args.action}\nAgent: ${args.agent_id}\nSummary: ${args.summary}`;
@@ -970,12 +811,8 @@ function registerTools(server: McpServer): void {
         if (result.error) return errorResponse(String(result.error));
         const signedEvent = result.event as Record<string, unknown>;
 
-        const publishedTo = await publishToRelays(
-          signedEvent,
-          ATTESTATION_RELAYS,
-        );
-        if (publishedTo.length === 0)
-          return errorResponse('Failed to publish receipt to any relay');
+        const publishedTo = await publishToRelays(signedEvent, ATTESTATION_RELAYS);
+        if (publishedTo.length === 0) return errorResponse('Failed to publish receipt to any relay');
 
         const eventId = signedEvent.id as string;
         logger.info(
@@ -994,9 +831,7 @@ function registerTools(server: McpServer): void {
               text: JSON.stringify({
                 receipt_event_id: eventId,
                 nostr_url: `https://njump.me/${eventId}`,
-                signed_at: new Date(
-                  (signedEvent.created_at as number) * 1000,
-                ).toISOString(),
+                signed_at: new Date((signedEvent.created_at as number) * 1000).toISOString(),
                 pubkey: OUR_PUBKEY,
               }),
             },
@@ -1013,37 +848,25 @@ function registerTools(server: McpServer): void {
     'verify_receipt',
     `Verify an action receipt by event ID. Confirms it was signed by Jorgenclaw's key. Price: ${TOOL_PRICE_VERIFY_RECEIPT} sat.`,
     {
-      event_id: z
-        .string()
-        .describe('Nostr event ID of the action receipt to verify'),
+      event_id: z.string().describe('Nostr event ID of the action receipt to verify'),
       nip05: z
         .string()
         .optional()
-        .describe(
-          'Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free',
-        ),
-      payment_preimage: z
-        .string()
-        .optional()
-        .describe('Lightning payment preimage (64 hex chars)'),
+        .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
+      payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
     async (args) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
-        const bolt11 = generateInvoice(
-          TOOL_PRICE_VERIFY_RECEIPT,
-          'verify_receipt',
-        );
+        const bolt11 = generateInvoice(TOOL_PRICE_VERIFY_RECEIPT, 'verify_receipt');
         if (!bolt11) return errorResponse('Failed to generate invoice');
         return paymentRequiredResponse(bolt11, TOOL_PRICE_VERIFY_RECEIPT);
       }
-      if (!free && !verifyPreimage(args.payment_preimage!))
-        return errorResponse('Invalid payment preimage');
+      if (!free && !verifyPreimage(args.payment_preimage!)) return errorResponse('Invalid payment preimage');
 
       try {
         const events = await queryRelays({ ids: [args.event_id] }, 1);
-        if (events.length === 0)
-          return errorResponse('Event not found on relays');
+        if (events.length === 0) return errorResponse('Event not found on relays');
 
         const ev = events[0];
         const pubkey = ev.pubkey as string;
@@ -1053,10 +876,7 @@ function registerTools(server: McpServer): void {
         const agentTag = tags.find((t) => t[0] === 'agent');
         const actionTag = tags.find((t) => t[0] === 'action');
 
-        logger.info(
-          { tool: 'verify_receipt', eventId: args.event_id, valid },
-          'Paid tool call executed',
-        );
+        logger.info({ tool: 'verify_receipt', eventId: args.event_id, valid }, 'Paid tool call executed');
         return {
           content: [
             {
@@ -1066,12 +886,8 @@ function registerTools(server: McpServer): void {
                 signed_by: pubkey,
                 action: actionTag?.[1] || null,
                 agent_id: agentTag?.[1] || null,
-                summary:
-                  ((ev.content as string) || '').split('\nSummary: ')[1] ||
-                  null,
-                created_at: new Date(
-                  (ev.created_at as number) * 1000,
-                ).toISOString(),
+                summary: ((ev.content as string) || '').split('\nSummary: ')[1] || null,
+                created_at: new Date((ev.created_at as number) * 1000).toISOString(),
                 // TODO: cryptographic signature verification (schnorr)
               }),
             },
@@ -1089,81 +905,73 @@ function registerTools(server: McpServer): void {
 export async function startMcpServer(): Promise<void> {
   const activeSessions = new Map<string, SSEServerTransport>();
 
-  const httpServer = createServer(
-    async (req: IncomingMessage, res: ServerResponse) => {
-      const url = req.url || '/';
+  const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const url = req.url || '/';
 
-      // Health check
-      if (url === '/health' && req.method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+    // Health check
+    if (url === '/health' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          status: 'ok',
+          name: MCP_SERVER_NAME,
+          tools: [
+            'nostr_sign_event',
+            'nostr_publish_event',
+            'nostr_post_note',
+            'nostr_fetch_profile',
+            'nostr_zap',
+            'nostr_get_notes',
+            'lightning_create_invoice',
+            'create_action_receipt',
+            'verify_receipt',
+          ],
+        }),
+      );
+      return;
+    }
+
+    // SSE endpoint — client connects here to establish an MCP session
+    if (url === '/sse' && req.method === 'GET') {
+      const transport = new SSEServerTransport('/messages', res);
+      activeSessions.set(transport.sessionId, transport);
+      transport.onclose = () => activeSessions.delete(transport.sessionId);
+
+      const sessionServer = new McpServer({
+        name: MCP_SERVER_NAME,
+        version: '1.0.0',
+      });
+      registerTools(sessionServer);
+      await sessionServer.connect(transport);
+      return;
+    }
+
+    // Message endpoint — client sends JSON-RPC messages here
+    if (url.startsWith('/messages') && req.method === 'POST') {
+      const sessionId = new URL(url, `http://${req.headers.host}`).searchParams.get('sessionId');
+      const transport = sessionId ? activeSessions.get(sessionId) : undefined;
+      if (!transport) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
-            status: 'ok',
-            name: MCP_SERVER_NAME,
-            tools: [
-              'nostr_sign_event',
-              'nostr_publish_event',
-              'nostr_post_note',
-              'nostr_fetch_profile',
-              'nostr_zap',
-              'nostr_get_notes',
-              'lightning_create_invoice',
-              'create_action_receipt',
-              'verify_receipt',
-            ],
+            error: 'No active session. Connect to /sse first.',
           }),
         );
         return;
       }
+      await transport.handlePostMessage(req, res);
+      return;
+    }
 
-      // SSE endpoint — client connects here to establish an MCP session
-      if (url === '/sse' && req.method === 'GET') {
-        const transport = new SSEServerTransport('/messages', res);
-        activeSessions.set(transport.sessionId, transport);
-        transport.onclose = () => activeSessions.delete(transport.sessionId);
-
-        const sessionServer = new McpServer({
-          name: MCP_SERVER_NAME,
-          version: '1.0.0',
-        });
-        registerTools(sessionServer);
-        await sessionServer.connect(transport);
-        return;
-      }
-
-      // Message endpoint — client sends JSON-RPC messages here
-      if (url.startsWith('/messages') && req.method === 'POST') {
-        const sessionId = new URL(
-          url,
-          `http://${req.headers.host}`,
-        ).searchParams.get('sessionId');
-        const transport = sessionId ? activeSessions.get(sessionId) : undefined;
-        if (!transport) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              error: 'No active session. Connect to /sse first.',
-            }),
-          );
-          return;
-        }
-        await transport.handlePostMessage(req, res);
-        return;
-      }
-
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          error: 'Not found. Use /sse for MCP or /health for status.',
-        }),
-      );
-    },
-  );
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        error: 'Not found. Use /sse for MCP or /health for status.',
+      }),
+    );
+  });
 
   httpServer.listen(MCP_SERVER_PORT, '0.0.0.0', () => {
-    logger.info(
-      { port: MCP_SERVER_PORT, name: MCP_SERVER_NAME },
-      'Paid MCP server started',
-    );
+    logger.info({ port: MCP_SERVER_PORT, name: MCP_SERVER_NAME }, 'Paid MCP server started');
   });
 }
