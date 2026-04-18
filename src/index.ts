@@ -56,6 +56,9 @@ import './channels/index.js';
 // append registry-based modules. Imported for side effects (registrations).
 import './modules/index.js';
 
+// Custom delivery action: register_contact (agent approves new contacts from chat)
+import './contact-registration.js';
+
 import type { ChannelAdapter, ChannelSetup, ConversationConfig } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
 
