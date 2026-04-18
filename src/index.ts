@@ -6,7 +6,7 @@
  */
 import path from 'path';
 
-import { CREDENTIAL_PROXY_PORT, DATA_DIR } from './config.js';
+import { CREDENTIAL_PROXY_PORT, DATA_DIR, MCP_SERVER_ENABLED } from './config.js';
 import { PROXY_BIND_HOST } from './container-runtime.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import { initHealthMonitor } from './health.js';
@@ -173,6 +173,13 @@ async function main(): Promise<void> {
   // 6. Start host sweep
   startHostSweep();
   log.info('Host sweep started');
+
+  // 7. Start MCP server (if enabled)
+  if (MCP_SERVER_ENABLED) {
+    const { startMcpServer } = await import('./mcp-server.js');
+    startMcpServer();
+    log.info('MCP server started');
+  }
 
   log.info('NanoClaw running');
 }

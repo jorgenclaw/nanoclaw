@@ -13,6 +13,7 @@ import { CONTAINER_HOST_GATEWAY, CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonl
 import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
 import { getRegisteredChannelNames, getChannelContainerConfig } from './channels/channel-registry.js';
+import { buildContainerSecurityRules, buildReadonlyOverlays, loadSecurityPolicy } from './security-policy.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
@@ -239,6 +240,15 @@ function buildMounts(
     mounts.push(...providerContribution.mounts);
   }
 
+  // Security policy readonly overlays (e.g. CLAUDE.md mounted read-only)
+  try {
+    const policy = loadSecurityPolicy();
+    const overlays = buildReadonlyOverlays(policy, groupDir);
+    mounts.push(...overlays);
+  } catch {
+    // Security policy load failure shouldn't block container spawn
+  }
+
   return mounts;
 }
 
@@ -330,6 +340,15 @@ async function buildContainerArgs(
         args.push('-e', `${key}=${value}`);
       }
     }
+  }
+
+  // Security policy rules — injected as JSON env var for agent-runner
+  try {
+    const policy = loadSecurityPolicy();
+    const rules = buildContainerSecurityRules(policy);
+    args.push('-e', `NANOCLAW_SECURITY_RULES=${JSON.stringify(rules)}`);
+  } catch {
+    // Policy load failure shouldn't block container spawn
   }
 
   // Main-group-only env vars from .env (GitHub, AWS, OpenAI)

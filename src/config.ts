@@ -87,6 +87,9 @@ export const NOSTR_SIGNER_SOCKET = process.env.NOSTR_SIGNER_SOCKET || '/run/nost
 export const NOSTR_DM_RELAYS = (process.env.NOSTR_DM_RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band').split(',');
 export const NOSTR_DM_ALLOWLIST = new Set((process.env.NOSTR_DM_ALLOWLIST || '').split(',').filter(Boolean));
 
+// MCP Server
+export const MCP_SERVER_ENABLED = process.env.MCP_SERVER_ENABLED === 'true';
+
 // Security Policy
 export const SECURITY_POLICY_PATH = process.env.SECURITY_POLICY_PATH || path.join(HOME_DIR, '.config', 'nanoclaw', 'security-policy.json');
 

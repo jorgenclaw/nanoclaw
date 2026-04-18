@@ -6,6 +6,7 @@ import { migration002 } from './002-chat-sdk-state.js';
 import { moduleAgentToAgentDestinations } from './module-agent-to-agent-destinations.js';
 import { migration008 } from './008-dropped-messages.js';
 import { migration009 } from './009-drop-pending-credentials.js';
+import { migration010 } from './010-token-usage.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 
@@ -23,6 +24,7 @@ const migrations: Migration[] = [
   moduleApprovalsTitleOptions,
   migration008,
   migration009,
+  migration010,
 ];
 
 export function runMigrations(db: Database.Database): void {
