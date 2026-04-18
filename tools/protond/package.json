@@ -1,0 +1,11 @@
+{
+  "name": "protond",
+  "version": "1.0.0",
+  "description": "Proton authentication daemon — SRP auth, session management, calendar operations via Unix socket",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "openpgp": "^6.0.1"
+  }
+}

@@ -51,10 +51,9 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
-  thread_id?: string;
-  reply_to_message_id?: string;
-  reply_to_message_content?: string;
-  reply_to_sender_name?: string;
+  quoted_message_id?: string;
+  quoted_text?: string;
+  quoted_author?: string;
 }
 
 export interface ScheduledTask {
@@ -82,17 +81,34 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Media attachment support ---
+
+export interface IpcMedia {
+  filePath: string; // Absolute path on the host filesystem
+  fileName?: string; // Display filename for the attachment
+  caption?: string; // Optional caption alongside the file
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string, media?: IpcMedia): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  // Optional: react to a message with an emoji (e.g. thumbs up acknowledgment).
+  sendReaction?(
+    jid: string,
+    messageId: string,
+    emoji: string,
+    targetAuthor?: string,
+  ): Promise<void>;
+  // Optional: send an image/file attachment with optional caption.
+  sendImage?(jid: string, filePath: string, caption?: string): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
 }

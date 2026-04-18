@@ -16,14 +16,17 @@ export function formatMessages(
 ): string {
   const lines = messages.map((m) => {
     const displayTime = formatLocalTime(m.timestamp, timezone);
-    const replyAttr = m.reply_to_message_id
-      ? ` reply_to="${escapeXml(m.reply_to_message_id)}"`
-      : '';
-    const replySnippet =
-      m.reply_to_message_content && m.reply_to_sender_name
-        ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name)}">${escapeXml(m.reply_to_message_content)}</quoted_message>`
-        : '';
-    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${replySnippet}${escapeXml(m.content)}</message>`;
+    // When a message is a reply to another, prepend a context line so the
+    // agent knows which earlier message it refers to. Truncate quoted text
+    // to keep the prompt manageable.
+    let body = m.content;
+    if (m.quoted_message_id) {
+      const author = m.quoted_author || 'unknown';
+      const snippet = (m.quoted_text || '').slice(0, 200);
+      const prefix = `↩ Replying to [${author}, message ${m.quoted_message_id}]: "${snippet}"\n\n`;
+      body = `${prefix}${body}`;
+    }
+    return `<message id="${escapeXml(m.id)}" sender="${escapeXml(m.sender_name)}" sender_id="${escapeXml(m.sender)}" time="${escapeXml(displayTime)}">${escapeXml(body)}</message>`;
   });
 
   const header = `<context timezone="${escapeXml(timezone)}" />\n`;
@@ -38,7 +41,10 @@ export function stripInternalTags(text: string): string {
 export function formatOutbound(rawText: string): string {
   const text = stripInternalTags(rawText);
   if (!text) return '';
-  return text;
+  // Strip image syntax — exfiltration vector (data encoded in URL)
+  return text
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '[image removed]')
+    .replace(/<img[^>]*>/gi, '[image removed]');
 }
 
 export function routeOutbound(

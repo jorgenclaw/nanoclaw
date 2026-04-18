@@ -1,17 +1,75 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+
+const MAX_IPC_FILE_SIZE = 1 * 1024 * 1024; // 1MB
+const MAX_OUTBOUND_MESSAGE_LENGTH = 50_000;
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { IpcMedia, RegisteredGroup } from './types.js';
+
+/**
+ * Map a container file path back to the host filesystem.
+ * Known mount mappings:
+ *   /workspace/group/    → groups/<folder>/
+ *   /workspace/attachments/ → ~/.local/share/signal-cli/attachments/
+ *   /run/whitenoise/media_cache/ → ~/.local/share/whitenoise-cli/release/media_cache/
+ *   /workspace/ipc/      → data/ipc/<folder>/
+ */
+function resolveContainerPath(
+  containerPath: string,
+  groupFolder: string,
+): string | null {
+  if (containerPath.startsWith('/workspace/group/')) {
+    const relative = containerPath.slice('/workspace/group/'.length);
+    return path.join(GROUPS_DIR, groupFolder, relative);
+  }
+  if (containerPath.startsWith('/workspace/attachments/')) {
+    const relative = containerPath.slice('/workspace/attachments/'.length);
+    return path.join(
+      os.homedir(),
+      '.local',
+      'share',
+      'signal-cli',
+      'attachments',
+      relative,
+    );
+  }
+  if (containerPath.startsWith('/run/whitenoise/media_cache/')) {
+    const relative = containerPath.slice('/run/whitenoise/media_cache/'.length);
+    return path.join(
+      os.homedir(),
+      '.local',
+      'share',
+      'whitenoise-cli',
+      'release',
+      'media_cache',
+      relative,
+    );
+  }
+  if (containerPath.startsWith('/workspace/ipc/')) {
+    const relative = containerPath.slice('/workspace/ipc/'.length);
+    return path.join(DATA_DIR, 'ipc', groupFolder, relative);
+  }
+  // Unknown path — return null (don't allow arbitrary host paths)
+  return null;
+}
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, media?: IpcMedia) => Promise<void>;
+  sendReaction: (
+    jid: string,
+    messageId: string,
+    emoji: string,
+    targetAuthor?: string,
+  ) => Promise<void>;
+  sendImage: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -73,23 +131,155 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
+              const stat = fs.statSync(filePath);
+              if (stat.size > MAX_IPC_FILE_SIZE) {
+                const errorDir = path.join(ipcBaseDir, 'errors');
+                fs.mkdirSync(errorDir, { recursive: true });
+                fs.renameSync(
+                  filePath,
+                  path.join(errorDir, `${sourceGroup}-${file}`),
+                );
+                logger.warn(
+                  { filePath, size: stat.size },
+                  'IPC file exceeds size limit, moved to errors',
+                );
+                continue;
+              }
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (
+                data.type === 'message' &&
+                data.chatJid &&
+                (data.text || data.filePath)
+              ) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  // Build media object if a file path is provided
+                  // Translate container path to host path: /workspace/group/<rel> → {GROUPS_DIR}/{sourceGroup}/<rel>
+                  let media: IpcMedia | undefined;
+                  const CONTAINER_GROUP_PREFIX = '/workspace/group/';
+                  if (
+                    data.filePath &&
+                    typeof data.filePath === 'string' &&
+                    data.filePath.startsWith(CONTAINER_GROUP_PREFIX)
+                  ) {
+                    const relativePath = data.filePath.slice(
+                      CONTAINER_GROUP_PREFIX.length,
+                    );
+                    const hostPath = path.resolve(
+                      GROUPS_DIR,
+                      sourceGroup,
+                      relativePath,
+                    );
+                    if (
+                      hostPath.startsWith(
+                        path.resolve(GROUPS_DIR, sourceGroup) + path.sep,
+                      )
+                    ) {
+                      media = {
+                        filePath: hostPath,
+                        fileName: data.fileName || undefined,
+                        caption: data.caption || undefined,
+                      };
+                    } else {
+                      logger.warn(
+                        { filePath: data.filePath, sourceGroup },
+                        'IPC media path traversal attempt blocked',
+                      );
+                    }
+                  }
+
+                  let text = (data.text || '') as string;
+                  if (text.length > MAX_OUTBOUND_MESSAGE_LENGTH) {
+                    logger.warn(
+                      { length: text.length, chatJid: data.chatJid },
+                      'Truncating outbound IPC message',
+                    );
+                    text =
+                      text.slice(0, MAX_OUTBOUND_MESSAGE_LENGTH) +
+                      '\n[truncated]';
+                  }
+                  await deps.sendMessage(data.chatJid, text, media);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, hasMedia: !!media },
                     'IPC message sent',
                   );
                 } else {
                   logger.warn(
                     { chatJid: data.chatJid, sourceGroup },
                     'Unauthorized IPC message attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'reaction' &&
+                data.chatJid &&
+                data.messageId &&
+                data.emoji
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  await deps.sendReaction(
+                    data.chatJid,
+                    data.messageId,
+                    data.emoji,
+                    data.targetAuthor,
+                  );
+                  logger.info(
+                    { chatJid: data.chatJid, emoji: data.emoji, sourceGroup },
+                    'IPC reaction sent',
+                  );
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC reaction attempt blocked',
+                  );
+                }
+              } else if (
+                data.type === 'image' &&
+                data.chatJid &&
+                data.filePath
+              ) {
+                const targetGroup = registeredGroups[data.chatJid];
+                if (
+                  isMain ||
+                  (targetGroup && targetGroup.folder === sourceGroup)
+                ) {
+                  // Resolve container path to host path
+                  const hostPath = resolveContainerPath(
+                    data.filePath,
+                    sourceGroup,
+                  );
+                  if (hostPath && fs.existsSync(hostPath)) {
+                    await deps.sendImage(data.chatJid, hostPath, data.caption);
+                    logger.info(
+                      {
+                        chatJid: data.chatJid,
+                        filePath: hostPath,
+                        sourceGroup,
+                      },
+                      'IPC image sent',
+                    );
+                  } else {
+                    logger.warn(
+                      {
+                        chatJid: data.chatJid,
+                        containerPath: data.filePath,
+                        hostPath,
+                        sourceGroup,
+                      },
+                      'IPC image file not found on host',
+                    );
+                  }
+                } else {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup },
+                    'Unauthorized IPC image attempt blocked',
                   );
                 }
               }
@@ -124,6 +314,20 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
+              const stat = fs.statSync(filePath);
+              if (stat.size > MAX_IPC_FILE_SIZE) {
+                const errorDir = path.join(ipcBaseDir, 'errors');
+                fs.mkdirSync(errorDir, { recursive: true });
+                fs.renameSync(
+                  filePath,
+                  path.join(errorDir, `${sourceGroup}-${file}`),
+                );
+                logger.warn(
+                  { filePath, size: stat.size },
+                  'IPC task file exceeds size limit, moved to errors',
+                );
+                continue;
+              }
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               // Pass source group identity to processTaskIpc for authorization
               await processTaskIpc(data, sourceGroup, isMain, deps);

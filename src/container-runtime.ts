@@ -3,6 +3,7 @@
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
+import fs from 'fs';
 import os from 'os';
 
 import { logger } from './logger.js';
@@ -10,11 +11,41 @@ import { logger } from './logger.js';
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
 
-/** CLI args needed for the container to resolve the host gateway. */
+/**
+ * Whether to use host networking for containers.
+ * Bare-metal Linux: use --network host so containers reach the host proxy via
+ * 127.0.0.1, bypassing docker bridge routing which can be blocked by firewalls.
+ * macOS/WSL: Docker Desktop handles host.docker.internal routing, no host network needed.
+ */
+function useHostNetwork(): boolean {
+  if (os.platform() !== 'linux') return false;
+  if (fs.existsSync('/proc/sys/fs/binfmt_misc/WSLInterop')) return false;
+  return true;
+}
+
+/** Hostname containers use to reach the host machine. */
+export const CONTAINER_HOST_GATEWAY = useHostNetwork()
+  ? '127.0.0.1'
+  : 'host.docker.internal';
+
+/**
+ * Address the credential proxy binds to.
+ * Docker Desktop (macOS/WSL): 127.0.0.1 — the VM routes host.docker.internal to loopback.
+ * Bare-metal Linux: 127.0.0.1 — containers use --network host and reach the proxy via loopback.
+ */
+export const PROXY_BIND_HOST =
+  process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
+
+function detectProxyBindHost(): string {
+  return '127.0.0.1';
+}
+
+/** CLI args needed for the container to reach the host. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
-  if (os.platform() === 'linux') {
-    return ['--add-host=host.docker.internal:host-gateway'];
+  // Bare-metal Linux: use host networking so containers share the host network namespace
+  // and can reach the credential proxy at 127.0.0.1 without bridge routing issues.
+  if (useHostNetwork()) {
+    return ['--network', 'host'];
   }
   return [];
 }
@@ -27,7 +58,7 @@ export function readonlyMountArgs(
   return ['-v', `${hostPath}:${containerPath}:ro`];
 }
 
-/** Stop a container by name. Uses execFileSync to avoid shell injection. */
+/** Stop a container by name. Validates name to avoid shell injection. */
 export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);

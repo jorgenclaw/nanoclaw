@@ -4,32 +4,42 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
+  CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
-  ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  CONTAINER_HOST_GATEWAY,
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
+import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
+import {
+  buildReadonlyOverlays,
+  ContainerSecurityRules,
+  getDefaultPolicy,
+  SecurityPolicy,
+} from './security-policy.js';
 import { RegisteredGroup } from './types.js';
 
-const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+const onecli = new OneCLI({ url: ONECLI_URL });
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -43,6 +53,9 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  senderTrusted?: boolean;
+  securityRules?: ContainerSecurityRules;
+  allowedTools?: string[];
   script?: string;
 }
 
@@ -51,6 +64,8 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 interface VolumeMount {
@@ -62,6 +77,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  policy: SecurityPolicy,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -69,7 +85,7 @@ function buildVolumeMounts(
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
-    // (store, group folder, IPC, .claude/) are mounted separately below.
+    // (group folder, IPC, .claude/) are mounted separately below.
     // Read-only prevents the agent from modifying host application code
     // (src/, dist/, package.json, etc.) which would bypass the sandbox
     // entirely on next restart.
@@ -80,7 +96,7 @@ function buildVolumeMounts(
     });
 
     // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Credentials are injected by the OneCLI gateway, never exposed to containers.
+    // Credentials are injected by the credential proxy, never exposed to containers.
     const envFile = path.join(projectRoot, '.env');
     if (fs.existsSync(envFile)) {
       mounts.push({
@@ -90,15 +106,6 @@ function buildVolumeMounts(
       });
     }
 
-    // Main gets writable access to the store (SQLite DB) so it can
-    // query and write to the database directly.
-    const storeDir = path.join(projectRoot, 'store');
-    mounts.push({
-      hostPath: storeDir,
-      containerPath: '/workspace/project/store',
-      readonly: false,
-    });
-
     // Main also gets its group folder as the working directory
     mounts.push({
       hostPath: groupDir,
@@ -106,15 +113,6 @@ function buildVolumeMounts(
       readonly: false,
     });
 
-    // Global memory directory — writable for main so it can update shared context
-    const globalDir = path.join(GROUPS_DIR, 'global');
-    if (fs.existsSync(globalDir)) {
-      mounts.push({
-        hostPath: globalDir,
-        containerPath: '/workspace/global',
-        readonly: false,
-      });
-    }
   } else {
     // Other groups only get their own folder
     mounts.push({
@@ -165,6 +163,20 @@ function buildVolumeMounts(
         null,
         2,
       ) + '\n',
+    );
+  }
+
+  // Sync OAuth credentials so the container can auto-refresh tokens.
+  // This avoids the need for a static CLAUDE_CODE_OAUTH_TOKEN in .env.
+  const hostCredentials = path.join(
+    os.homedir(),
+    '.claude',
+    '.credentials.json',
+  );
+  if (fs.existsSync(hostCredentials)) {
+    fs.copyFileSync(
+      hostCredentials,
+      path.join(groupSessionsDir, '.credentials.json'),
     );
   }
 
@@ -230,6 +242,203 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Signal attachments: allows agent to view images sent via Signal
+  // Mounted read-only so agents can read but not delete attachments
+  const signalAttachmentsDir = path.join(
+    os.homedir(),
+    '.local',
+    'share',
+    'signal-cli',
+    'attachments',
+  );
+  if (fs.existsSync(signalAttachmentsDir)) {
+    mounts.push({
+      hostPath: signalAttachmentsDir,
+      containerPath: '/workspace/attachments',
+      readonly: true,
+    });
+  }
+
+  // White Noise CLI: mount container-compatible wn binary (built against glibc 2.36)
+  // The host-compiled binary won't work in the container due to glibc version mismatch
+  const wnBin = path.join(
+    os.homedir(),
+    'whitenoise-rs',
+    'target',
+    'container',
+    'wn',
+  );
+  const wndBin = path.join(
+    os.homedir(),
+    'whitenoise-rs',
+    'target',
+    'release',
+    'wnd',
+  );
+  if (fs.existsSync(wnBin)) {
+    mounts.push({
+      hostPath: wnBin,
+      containerPath: '/usr/local/bin/wn',
+      readonly: true,
+    });
+  }
+  if (fs.existsSync(wndBin)) {
+    mounts.push({
+      hostPath: wndBin,
+      containerPath: '/usr/local/bin/wnd',
+      readonly: true,
+    });
+  }
+
+  // White Noise daemon socket: allows wn CLI in container to talk to host wnd daemon
+  const wndSocketDir = path.join(
+    os.homedir(),
+    '.local',
+    'share',
+    'whitenoise-cli',
+    'release',
+  );
+  if (fs.existsSync(wndSocketDir)) {
+    mounts.push({
+      hostPath: wndSocketDir,
+      containerPath: '/run/whitenoise',
+      readonly: false,
+    });
+  }
+
+  // Nostr signing daemon socket: allows agent to sign events without seeing the private key
+  const nostrSignerSocket = path.join(
+    process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() || 1000}`,
+    'nostr-signer.sock',
+  );
+  if (fs.existsSync(nostrSignerSocket)) {
+    mounts.push({
+      hostPath: nostrSignerSocket,
+      containerPath: '/run/nostr/signer.sock',
+      readonly: false, // sockets need read-write for bidirectional communication
+    });
+  }
+
+  // Proton daemon socket: allows agent to access Proton Calendar (and future
+  // Mail/Drive) via authenticated API calls without seeing the passphrase.
+  const protondSocket = path.join(
+    process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() || 1000}`,
+    'protond.sock',
+  );
+  if (fs.existsSync(protondSocket)) {
+    mounts.push({
+      hostPath: protondSocket,
+      containerPath: '/run/proton/protond.sock',
+      readonly: false,
+    });
+  }
+
+  // Nostr signing tools: mount clawstr-post script + dependencies into container
+  const clawstrPostDir = path.join(projectRoot, 'tools', 'nostr-signer');
+  if (fs.existsSync(path.join(clawstrPostDir, 'clawstr-post.js'))) {
+    mounts.push({
+      hostPath: clawstrPostDir,
+      containerPath: '/usr/local/lib/nostr-signer',
+      readonly: true,
+    });
+  }
+
+  // NWC wallet tool: mount the CLI script into the container
+  const nwcWalletDir = path.join(projectRoot, 'tools', 'nwc-wallet');
+  if (fs.existsSync(path.join(nwcWalletDir, 'index.js'))) {
+    mounts.push({
+      hostPath: nwcWalletDir,
+      containerPath: '/usr/local/lib/nwc-wallet',
+      readonly: true,
+    });
+  }
+
+  // Proton MCP server: mail, pass, drive, calendar, VPN tools (all groups)
+  const protonMcpDir = path.join(projectRoot, 'tools', 'proton-mcp');
+  if (fs.existsSync(protonMcpDir)) {
+    mounts.push({
+      hostPath: protonMcpDir,
+      containerPath: '/usr/local/lib/proton-mcp',
+      readonly: true,
+    });
+  }
+  const protonBridgeConfig = path.join(os.homedir(), '.proton-mcp');
+  if (fs.existsSync(protonBridgeConfig)) {
+    mounts.push({
+      hostPath: protonBridgeConfig,
+      containerPath: '/home/node/.proton-mcp',
+      readonly: true,
+    });
+  }
+
+  // Proton Pass CLI: main-only (credential vault access is architecturally restricted)
+  if (isMain) {
+    const passCliBin = path.join(os.homedir(), '.local', 'bin', 'pass-cli');
+    if (fs.existsSync(passCliBin)) {
+      mounts.push({
+        hostPath: passCliBin,
+        containerPath: '/usr/local/bin/pass-cli',
+        readonly: true,
+      });
+    }
+
+    const passCliData = path.join(
+      os.homedir(),
+      '.local',
+      'share',
+      'proton-pass-cli',
+    );
+    if (fs.existsSync(passCliData)) {
+      mounts.push({
+        hostPath: passCliData,
+        containerPath: '/home/node/.local/share/proton-pass-cli',
+        readonly: false,
+      });
+    }
+
+    // rclone binary and config for Proton Drive
+    const rcloneBin = '/usr/bin/rclone';
+    if (fs.existsSync(rcloneBin)) {
+      mounts.push({
+        hostPath: rcloneBin,
+        containerPath: '/usr/local/bin/rclone',
+        readonly: true,
+      });
+    }
+
+    const rcloneConfig = path.join(os.homedir(), '.config', 'rclone');
+    if (fs.existsSync(rcloneConfig)) {
+      mounts.push({
+        hostPath: rcloneConfig,
+        containerPath: '/home/node/.config/rclone',
+        readonly: true,
+      });
+    }
+
+    // GitHub CLI binary
+    const ghBin = '/usr/bin/gh';
+    if (fs.existsSync(ghBin)) {
+      mounts.push({
+        hostPath: ghBin,
+        containerPath: '/usr/local/bin/gh',
+        readonly: true,
+      });
+    }
+  }
+
+  // Protect settings.json from agent modification (SDK env var injection)
+  if (fs.existsSync(settingsFile)) {
+    mounts.push({
+      hostPath: settingsFile,
+      containerPath: '/home/node/.claude/settings.json',
+      readonly: true,
+    });
+  }
+
+  // Security policy: readonly overlays for config files (all groups)
+  const securityOverlays = buildReadonlyOverlays(policy, groupDir);
+  mounts.push(...securityOverlays);
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -240,32 +449,84 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  // System prompt file — always mounted read-only so agents cannot modify it.
+  // Only the user (on the host) can change its contents.
+  // The agent runner reads it at /workspace/system-prompt.md and prepends it
+  // to every invocation's system prompt.
+  const systemPromptFile = path.join(projectRoot, 'system-prompt.md');
+  if (fs.existsSync(systemPromptFile)) {
+    mounts.push({
+      hostPath: systemPromptFile,
+      containerPath: '/workspace/system-prompt.md',
+      readonly: true,
+    });
+  }
+
   return mounts;
 }
 
-async function buildContainerArgs(
+function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
-  agentIdentifier?: string,
-): Promise<string[]> {
+  isMain = false,
+): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // Disable seccomp so Chromium (agent-browser) can launch inside containers.
+  args.push('--security-opt', 'seccomp=unconfined');
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', 'BLOSSOM_SERVER=https://blossom.jorgenclaw.ai');
 
-  // OneCLI gateway handles credential injection — containers never see real secrets.
-  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false, // Nanoclaw already handles host gateway
-    agent: agentIdentifier,
-  });
-  if (onecliApplied) {
-    logger.info({ containerName }, 'OneCLI gateway config applied');
+  // Proton Pass CLI: use filesystem key provider (kernel keyring not available in containers)
+  args.push('-e', 'PROTON_PASS_KEY_PROVIDER=fs');
+
+  // Route API traffic through the credential proxy (containers never see real secrets)
+  args.push(
+    '-e',
+    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+  );
+
+  // Mirror the host's auth method with a placeholder value.
+  // API key mode: SDK sends x-api-key, proxy replaces with real key.
+  // OAuth mode:   SDK exchanges placeholder token for temp API key,
+  //               proxy injects real OAuth token on that exchange request.
+  const authMode = detectAuthMode();
+  if (authMode === 'api-key') {
+    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
   } else {
-    logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
-    );
+    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+  }
+
+  // GitHub CLI token (main-only — Jorgenclaw's own token for PR/issue management)
+  if (isMain) {
+    const ghEnv = readEnvFile(['GITHUB_TOKEN']);
+    const ghToken = process.env.GITHUB_TOKEN || ghEnv.GITHUB_TOKEN;
+    if (ghToken) {
+      args.push('-e', `GH_TOKEN=${ghToken}`);
+    }
+  }
+
+  // AWS credentials for Remotion Lambda + udioapi.pro key (main-only).
+  // Threaded via env vars so the container's SDKs read them directly.
+  if (isMain) {
+    const mainKeys = [
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_REGION',
+      'REMOTION_AWS_BUCKET',
+      'REMOTION_SERVE_URL',
+      'UDIOAPI_PRO_KEY',
+      'OPENAI_API_KEY',
+    ];
+    const mainEnv = readEnvFile(mainKeys);
+    for (const key of mainKeys) {
+      const value = process.env[key] || mainEnv[key];
+      if (value) {
+        args.push('-e', `${key}=${value}`);
+      }
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -299,24 +560,19 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  policy?: SecurityPolicy,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  // Use provided policy or load defaults for mount overlay computation
+  const effectivePolicy = policy ?? getDefaultPolicy();
+  const mounts = buildVolumeMounts(group, input.isMain, effectivePolicy);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  // Main group uses the default OneCLI agent; others use their own agent.
-  const agentIdentifier = input.isMain
-    ? undefined
-    : group.folder.toLowerCase().replace(/_/g, '-');
-  const containerArgs = await buildContainerArgs(
-    mounts,
-    containerName,
-    agentIdentifier,
-  );
+  const containerArgs = buildContainerArgs(mounts, containerName, input.isMain);
 
   logger.debug(
     {
@@ -362,6 +618,9 @@ export async function runContainerAgent(
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
     let newSessionId: string | undefined;
+    let lastParsedError: string | undefined;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
     let outputChain = Promise.resolve();
 
     container.stdout.on('data', (data) => {
@@ -399,6 +658,11 @@ export async function runContainerAgent(
             const parsed: ContainerOutput = JSON.parse(jsonStr);
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
+            }
+            if (parsed.inputTokens) totalInputTokens = parsed.inputTokens;
+            if (parsed.outputTokens) totalOutputTokens = parsed.outputTokens;
+            if (parsed.status === 'error' && parsed.error) {
+              lastParsedError = parsed.error;
             }
             hadStreamingOutput = true;
             // Activity detected — reset the hard timeout
@@ -503,6 +767,8 @@ export async function runContainerAgent(
               status: 'success',
               result: null,
               newSessionId,
+              inputTokens: totalInputTokens || undefined,
+              outputTokens: totalOutputTokens || undefined,
             });
           });
           return;
@@ -590,6 +856,25 @@ export async function runContainerAgent(
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
       if (code !== 0) {
+        // Agent-runner idle watchdog fired after the response completed.
+        // The response already streamed out — this is cleanup, not a failure.
+        if (hadStreamingOutput && lastParsedError === 'Query idle timeout') {
+          logger.info(
+            { group: group.name, containerName, duration, code },
+            'Agent-runner idle timeout after successful response (suppressing alert)',
+          );
+          outputChain.then(() => {
+            resolve({
+              status: 'success',
+              result: null,
+              newSessionId,
+              inputTokens: totalInputTokens || undefined,
+              outputTokens: totalOutputTokens || undefined,
+            });
+          });
+          return;
+        }
+
         logger.error(
           {
             group: group.name,
@@ -614,13 +899,21 @@ export async function runContainerAgent(
       if (onOutput) {
         outputChain.then(() => {
           logger.info(
-            { group: group.name, duration, newSessionId },
+            {
+              group: group.name,
+              duration,
+              newSessionId,
+              inputTokens: totalInputTokens,
+              outputTokens: totalOutputTokens,
+            },
             'Container completed (streaming mode)',
           );
           resolve({
             status: 'success',
             result: null,
             newSessionId,
+            inputTokens: totalInputTokens || undefined,
+            outputTokens: totalOutputTokens || undefined,
           });
         });
         return;

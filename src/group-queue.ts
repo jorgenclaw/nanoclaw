@@ -55,6 +55,10 @@ export class GroupQueue {
     return state;
   }
 
+  isActive(groupJid: string): boolean {
+    return this.groups.get(groupJid)?.active ?? false;
+  }
+
   setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
     this.processMessagesFn = fn;
   }
@@ -66,6 +70,14 @@ export class GroupQueue {
 
     if (state.active) {
       state.pendingMessages = true;
+      // If a task container is idle, close it so messages can be processed
+      if (state.idleWaiting && state.isTaskContainer) {
+        logger.info(
+          { groupJid },
+          'Closing idle task container for pending messages',
+        );
+        this.closeStdin(groupJid);
+      }
       logger.debug({ groupJid }, 'Container active, message queued');
       return;
     }
@@ -148,9 +160,10 @@ export class GroupQueue {
   notifyIdle(groupJid: string): void {
     const state = this.getGroup(groupJid);
     state.idleWaiting = true;
-    if (state.pendingTasks.length > 0) {
-      this.closeStdin(groupJid);
-    }
+    // Always write _close so the container's for-await loop can exit its current
+    // query and transition to waitForIpcMessage. Without this the SDK generator
+    // never closes and the container gets stuck after every response.
+    this.closeStdin(groupJid);
   }
 
   /**

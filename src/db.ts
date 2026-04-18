@@ -32,6 +32,9 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      quoted_message_id TEXT,
+      quoted_text TEXT,
+      quoted_author TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -73,6 +76,16 @@ function createSchema(database: Database.Database): void {
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS token_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      run_at TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_token_usage_run_at ON token_usage(run_at);
+    CREATE INDEX IF NOT EXISTS idx_token_usage_group ON token_usage(group_folder, run_at);
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -113,6 +126,23 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add quoted_* columns for reply-to context (migration for existing DBs)
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN quoted_message_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN quoted_text TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN quoted_author TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
   // Add is_main column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -124,6 +154,39 @@ function createSchema(database: Database.Database): void {
     );
   } catch {
     /* column already exists */
+  }
+
+  // Drop UNIQUE constraint on registered_groups.folder so multiple channels
+  // can share one group folder (e.g. watch:scott and signal:<scott-uuid>
+  // both mapping to folder='main'). SQLite has no ALTER TABLE DROP
+  // CONSTRAINT, so rebuild the table when the old UNIQUE is still present.
+  const schemaRow = database
+    .prepare(
+      `SELECT sql FROM sqlite_master WHERE type='table' AND name='registered_groups'`,
+    )
+    .get() as { sql: string } | undefined;
+  if (schemaRow && /folder\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(schemaRow.sql)) {
+    database.exec(`
+      BEGIN;
+      CREATE TABLE registered_groups_new (
+        jid TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        folder TEXT NOT NULL,
+        trigger_pattern TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        container_config TEXT,
+        requires_trigger INTEGER DEFAULT 1,
+        is_main INTEGER DEFAULT 0
+      );
+      INSERT INTO registered_groups_new
+        (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
+      SELECT jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main
+      FROM registered_groups;
+      DROP TABLE registered_groups;
+      ALTER TABLE registered_groups_new RENAME TO registered_groups;
+      CREATE INDEX idx_registered_groups_folder ON registered_groups(folder);
+      COMMIT;
+    `);
   }
 
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
@@ -143,17 +206,6 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `UPDATE chats SET channel = 'telegram', is_group = 0 WHERE jid LIKE 'tg:%'`,
     );
-  } catch {
-    /* columns already exist */
-  }
-
-  // Add reply context columns if they don't exist (migration for existing DBs)
-  try {
-    database.exec(`ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`);
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN reply_to_message_content TEXT`,
-    );
-    database.exec(`ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT`);
   } catch {
     /* columns already exist */
   }
@@ -285,7 +337,7 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, quoted_message_id, quoted_text, quoted_author) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -295,9 +347,9 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
-    msg.reply_to_message_id ?? null,
-    msg.reply_to_message_content ?? null,
-    msg.reply_to_sender_name ?? null,
+    msg.quoted_message_id ?? null,
+    msg.quoted_text ?? null,
+    msg.quoted_author ?? null,
   );
 }
 
@@ -343,7 +395,7 @@ export function getNewMessages(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             quoted_message_id, quoted_text, quoted_author
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -377,7 +429,7 @@ export function getMessagesSince(
   const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             quoted_message_id, quoted_text, quoted_author
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -560,6 +612,20 @@ export function setRouterState(key: string, value: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run(key, value);
+}
+
+// --- Token usage ---
+
+export function logTokenUsage(
+  groupFolder: string,
+  chatJid: string,
+  inputTokens: number,
+  outputTokens: number,
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO token_usage (group_folder, chat_jid, run_at, input_tokens, output_tokens) VALUES (?, ?, ?, ?, ?)`,
+  ).run(groupFolder, chatJid, now, inputTokens, outputTokens);
 }
 
 // --- Session accessors ---

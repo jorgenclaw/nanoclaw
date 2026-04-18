@@ -13,12 +13,19 @@ import {
   getDueTasks,
   getTaskById,
   logTaskRun,
+  logTokenUsage,
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import {
+  buildAllowedTools,
+  buildContainerSecurityRules,
+  loadSecurityPolicy,
+  readKillswitch,
+} from './security-policy.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 /**
@@ -147,6 +154,9 @@ async function runTask(
     })),
   );
 
+  const policy = loadSecurityPolicy();
+  if (!readKillswitch(policy, task.group_folder).canRun) return;
+
   let result: string | null = null;
   let error: string | null = null;
 
@@ -180,6 +190,9 @@ async function runTask(
         isMain,
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
+        senderTrusted: false,
+        securityRules: buildContainerSecurityRules(policy),
+        allowedTools: buildAllowedTools(policy),
         script: task.script || undefined,
       },
       (proc, containerName) =>
@@ -208,6 +221,15 @@ async function runTask(
     } else if (output.result) {
       // Result was already forwarded to the user via the streaming callback above
       result = output.result;
+    }
+
+    if ((output.inputTokens || 0) + (output.outputTokens || 0) > 0) {
+      logTokenUsage(
+        task.group_folder,
+        task.chat_jid,
+        output.inputTokens || 0,
+        output.outputTokens || 0,
+      );
     }
 
     logger.info(
@@ -250,6 +272,19 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   schedulerRunning = true;
   logger.info('Scheduler loop started');
 
+  // Clean up orphaned once tasks: active with null next_run = was mid-execution during crash
+  const allTasks = getAllTasks();
+  for (const task of allTasks) {
+    if (
+      task.schedule_type === 'once' &&
+      task.status === 'active' &&
+      !task.next_run
+    ) {
+      updateTaskAfterRun(task.id, null, 'Cleaned up: orphaned after crash');
+      logger.info({ taskId: task.id }, 'Cleaned up orphaned once task');
+    }
+  }
+
   const loop = async () => {
     try {
       const dueTasks = getDueTasks();
@@ -262,6 +297,20 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         const currentTask = getTaskById(task.id);
         if (!currentTask || currentTask.status !== 'active') {
           continue;
+        }
+
+        // Atomically claim the task before dispatching: advance next_run to the
+        // next occurrence so that a process restart during execution won't find
+        // this task due again and double-fire it.  The in-memory dedup in
+        // GroupQueue.enqueueTask handles same-process races; this handles the
+        // cross-restart case where next_run was never advanced because
+        // updateTaskAfterRun() didn't complete.
+        const claimedNextRun = computeNextRun(currentTask);
+        if (claimedNextRun !== null) {
+          updateTask(currentTask.id, { next_run: claimedNextRun });
+        } else {
+          // 'once' task — mark completed now so a restart doesn't re-run it
+          updateTask(currentTask.id, { status: 'completed' });
         }
 
         deps.queue.enqueueTask(currentTask.chat_jid, currentTask.id, () =>

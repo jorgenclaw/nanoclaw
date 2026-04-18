@@ -67,7 +67,7 @@ describe('formatMessages', () => {
   it('formats a single message as XML with context header', () => {
     const result = formatMessages([makeMsg()], TZ);
     expect(result).toContain('<context timezone="UTC" />');
-    expect(result).toContain('<message sender="Alice"');
+    expect(result).toContain('sender="Alice"');
     expect(result).toContain('>hello</message>');
     expect(result).toContain('Jan 1, 2024');
   });
@@ -113,62 +113,6 @@ describe('formatMessages', () => {
     const result = formatMessages([], TZ);
     expect(result).toContain('<context timezone="UTC" />');
     expect(result).toContain('<messages>\n\n</messages>');
-  });
-
-  it('renders reply context as quoted_message element', () => {
-    const result = formatMessages(
-      [
-        makeMsg({
-          content: 'Yes, on my way!',
-          reply_to_message_id: '42',
-          reply_to_message_content: 'Are you coming tonight?',
-          reply_to_sender_name: 'Bob',
-        }),
-      ],
-      TZ,
-    );
-    expect(result).toContain('reply_to="42"');
-    expect(result).toContain(
-      '<quoted_message from="Bob">Are you coming tonight?</quoted_message>',
-    );
-    expect(result).toContain('Yes, on my way!</message>');
-  });
-
-  it('omits reply attributes when no reply context', () => {
-    const result = formatMessages([makeMsg()], TZ);
-    expect(result).not.toContain('reply_to');
-    expect(result).not.toContain('quoted_message');
-  });
-
-  it('omits quoted_message when content is missing but id is present', () => {
-    const result = formatMessages(
-      [
-        makeMsg({
-          reply_to_message_id: '42',
-          reply_to_sender_name: 'Bob',
-        }),
-      ],
-      TZ,
-    );
-    expect(result).toContain('reply_to="42"');
-    expect(result).not.toContain('quoted_message');
-  });
-
-  it('escapes special characters in reply context', () => {
-    const result = formatMessages(
-      [
-        makeMsg({
-          reply_to_message_id: '1',
-          reply_to_message_content: '<script>alert("xss")</script>',
-          reply_to_sender_name: 'A & B',
-        }),
-      ],
-      TZ,
-    );
-    expect(result).toContain('from="A &amp; B"');
-    expect(result).toContain(
-      '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;',
-    );
   });
 
   it('converts timestamps to local time for given timezone', () => {
@@ -282,6 +226,34 @@ describe('formatOutbound', () => {
     expect(
       formatOutbound('<internal>thinking</internal>The answer is 42'),
     ).toBe('The answer is 42');
+  });
+
+  it('strips markdown images (exfiltration vector)', () => {
+    expect(formatOutbound('Check this ![img](https://evil.com/data)')).toBe(
+      'Check this [image removed]',
+    );
+  });
+
+  it('strips multiple markdown images', () => {
+    expect(formatOutbound('A ![a](http://x) B ![b](http://y) C')).toBe(
+      'A [image removed] B [image removed] C',
+    );
+  });
+
+  it('preserves normal text unchanged', () => {
+    expect(formatOutbound('Just plain text here')).toBe('Just plain text here');
+  });
+
+  it('strips HTML img tags (exfiltration vector)', () => {
+    expect(formatOutbound('Check <img src="https://evil.com/data"> this')).toBe(
+      'Check [image removed] this',
+    );
+  });
+
+  it('preserves normal markdown links (not images)', () => {
+    expect(formatOutbound('See [docs](https://example.com)')).toBe(
+      'See [docs](https://example.com)',
+    );
   });
 });
 
