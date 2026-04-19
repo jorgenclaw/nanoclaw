@@ -48,10 +48,15 @@ function sha256hex(buffer) {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100MB
+
 async function upload(filePath) {
+  const size = statSync(filePath).size;
+  if (size > MAX_UPLOAD_BYTES) {
+    throw new Error(`File too large (${(size / 1024 / 1024).toFixed(1)}MB). Max ${MAX_UPLOAD_BYTES / 1024 / 1024}MB.`);
+  }
   const fileBuffer = readFileSync(filePath);
   const hash = sha256hex(fileBuffer);
-  const size = statSync(filePath).size;
   const name = basename(filePath);
   const now = Math.floor(Date.now() / 1000);
 

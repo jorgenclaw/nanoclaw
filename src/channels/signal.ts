@@ -109,13 +109,31 @@ function createSignalAdapter(): ChannelAdapter | null {
   let lastSignalCliRestart = Date.now();
   let lastReceiveEvent = Date.now();
 
-  function sendRpc(method: string, params?: Record<string, unknown>): void {
-    if (!socket || !connected) return;
-    const msg: JsonRpcRequest = { jsonrpc: '2.0', method, params, id: rpcId++ };
+  const pendingRpc = new Map<
+    number,
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; timeout: ReturnType<typeof setTimeout> }
+  >();
+  const RPC_TIMEOUT_MS = 60000;
+
+  function sendRpc(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    if (!socket || !connected) return Promise.reject(new Error('Signal not connected'));
+    const id = rpcId++;
+    const msg: JsonRpcRequest = { jsonrpc: '2.0', method, params, id };
     socket.write(JSON.stringify(msg) + '\n');
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingRpc.delete(id);
+        reject(new Error(`RPC ${method} (id=${id}) timed out after ${RPC_TIMEOUT_MS}ms`));
+      }, RPC_TIMEOUT_MS);
+      pendingRpc.set(id, { resolve, reject, timeout });
+    });
   }
 
-  function sendToSignal(platformId: string, text: string, attachments?: string[]): void {
+  function sendRpcFireAndForget(method: string, params?: Record<string, unknown>): void {
+    sendRpc(method, params).catch((err) => log.warn('RPC fire-and-forget error', { method, err }));
+  }
+
+  function sendToSignal(platformId: string, text: string, attachments?: string[]): Promise<unknown> {
     const isGroup = platformId.startsWith('group.');
     const params: Record<string, unknown> = {
       account: SIGNAL_PHONE_NUMBER,
@@ -127,7 +145,7 @@ function createSignalAdapter(): ChannelAdapter | null {
     } else {
       params.recipient = [platformId];
     }
-    sendRpc('send', params);
+    return sendRpc('send', params);
   }
 
   async function flushOutgoingQueue(): Promise<void> {
@@ -137,7 +155,11 @@ function createSignalAdapter(): ChannelAdapter | null {
       log.info('Flushing outgoing Signal queue', { count: outgoingQueue.length });
       while (outgoingQueue.length > 0) {
         const item = outgoingQueue.shift()!;
-        sendToSignal(item.platformId, item.text, item.attachments);
+        try {
+          await sendToSignal(item.platformId, item.text, item.attachments);
+        } catch (err) {
+          log.error('Failed to send queued Signal message', { platformId: item.platformId, err });
+        }
       }
     } finally {
       flushing = false;
@@ -275,7 +297,7 @@ function createSignalAdapter(): ChannelAdapter | null {
       clearAlert('signal-disconnect');
       log.info('Connected to signal-cli', { host: SIGNAL_CLI_TCP_HOST, port: SIGNAL_CLI_TCP_PORT });
 
-      sendRpc('subscribeReceive', { account: SIGNAL_PHONE_NUMBER });
+      sendRpcFireAndForget('subscribeReceive', { account: SIGNAL_PHONE_NUMBER });
       flushOutgoingQueue().catch((err) => log.error('Failed to flush outgoing queue', { err }));
 
       if (onFirstOpen) {
@@ -293,7 +315,16 @@ function createSignalAdapter(): ChannelAdapter | null {
         if (!trimmed) continue;
         try {
           const obj = JSON.parse(trimmed) as JsonRpcMessage;
-          if (obj.method === 'receive') {
+          if (obj.id != null && pendingRpc.has(obj.id)) {
+            const pending = pendingRpc.get(obj.id)!;
+            pendingRpc.delete(obj.id);
+            clearTimeout(pending.timeout);
+            if (obj.error) {
+              pending.reject(new Error(`signal-cli RPC error: ${JSON.stringify(obj.error)}`));
+            } else {
+              pending.resolve(obj.result);
+            }
+          } else if (obj.method === 'receive') {
             handleReceiveEvent(obj).catch((err) => log.error('Error handling receive event', { err }));
           }
         } catch (err) {
@@ -304,6 +335,11 @@ function createSignalAdapter(): ChannelAdapter | null {
 
     sock.on('close', () => {
       connected = false;
+      for (const [id, pending] of pendingRpc) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error('Signal socket closed'));
+      }
+      pendingRpc.clear();
       log.info('signal-cli socket closed, reconnecting in 5s', { queuedMessages: outgoingQueue.length });
       scheduleReconnect();
     });
@@ -406,7 +442,7 @@ function createSignalAdapter(): ChannelAdapter | null {
             } else {
               params.recipient = [platformId];
             }
-            sendRpc('sendReaction', params);
+            await sendRpc('sendReaction', params);
             log.info('Signal reaction sent', { platformId, emoji: rc.emoji, messageId: rc.messageId });
           }
         }
@@ -450,17 +486,29 @@ function createSignalAdapter(): ChannelAdapter | null {
       } else {
         params.recipient = [platformId];
       }
-      sendRpc('send', params);
-      log.info('Signal message sent', { platformId, textLen: text?.length ?? 0 });
+      try {
+        const result = (await sendRpc('send', params)) as { timestamp?: number } | undefined;
+        log.info('Signal message sent', {
+          platformId,
+          textLen: text?.length ?? 0,
+          timestamp: (result as any)?.timestamp,
+        });
 
-      // Clean up temp files after a delay (signal-cli reads them asynchronously)
-      if (tmpFiles.length > 0) {
-        setTimeout(() => {
+        // Clean up temp files after signal-cli confirms send
+        if (tmpFiles.length > 0) {
           for (const f of tmpFiles) fs.unlink(f, () => {});
-        }, 30000);
-      }
+        }
 
-      return undefined;
+        const ts = (result as any)?.timestamp;
+        return ts ? String(ts) : undefined;
+      } catch (err) {
+        log.error('Signal send failed', { platformId, err });
+        // Clean up temp files on failure too
+        if (tmpFiles.length > 0) {
+          for (const f of tmpFiles) fs.unlink(f, () => {});
+        }
+        throw err;
+      }
     },
   };
 

@@ -14,6 +14,7 @@
  */
 
 import { connect } from 'net';
+import WebSocket from 'ws';
 
 const SOCKET_PATH = process.env.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
 const DEFAULT_RELAYS = (process.env.NOSTR_RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net,wss://relay.nostr.band,wss://purplepag.es').split(',');
@@ -58,7 +59,6 @@ async function publishToRelays(event) {
   const results = [];
   const promises = DEFAULT_RELAYS.map(async (url) => {
     try {
-      const { default: WebSocket } = await import('ws');
       const ws = new WebSocket(url);
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => { ws.close(); reject(new Error('timeout')); }, 10000);
@@ -97,7 +97,6 @@ async function cmdPost(subclaw, content) {
   const subclawUrl = `https://clawstr.com/c/${name}`;
   const tags = [
     ['I', subclawUrl], ['K', 'web'],
-    ['i', subclawUrl], ['k', 'web'],
     ['L', 'agent'], ['l', 'ai', 'agent'],
     ['client', 'clawstr-cli'],
   ];
@@ -137,12 +136,17 @@ async function cmdReply(eventId, subclaw, content) {
   }
 }
 
-async function cmdUpvote(eventId) {
+async function cmdUpvote(eventId, authorPubkey) {
   if (!eventId) {
-    console.error('Usage: clawstr-post upvote <event-id>');
+    console.error('Usage: clawstr-post upvote <event-id> [author-pubkey]');
     process.exit(1);
   }
-  const tags = [['e', eventId], ['client', 'clawstr-cli']];
+  const tags = [
+    ['e', eventId],
+    ...(authorPubkey ? [['p', authorPubkey]] : []),
+    ['L', 'agent'], ['l', 'ai', 'agent'],
+    ['client', 'clawstr-cli'],
+  ];
   const event = await signEvent(7, '+', tags);
   const relays = await publishToRelays(event);
   if (relays.length > 0) {
@@ -171,7 +175,7 @@ try {
   switch (cmd) {
     case 'post':    await cmdPost(args[0], args.slice(1).join(' ')); break;
     case 'reply':   await cmdReply(args[0], args[1], args.slice(2).join(' ')); break;
-    case 'upvote':  await cmdUpvote(args[0]); break;
+    case 'upvote':  await cmdUpvote(args[0], args[1]); break;
     case 'pubkey':  console.log(await getPubkey()); break;
     case 'sign':    await cmdSign(args[0]); break;
     default:

@@ -16,7 +16,7 @@
 
 import { execSync } from 'child_process';
 import { createServer } from 'net';
-import { existsSync, unlinkSync, appendFileSync, mkdirSync } from 'fs';
+import { existsSync, unlinkSync, appendFileSync, mkdirSync, chmodSync } from 'fs';
 import { dirname } from 'path';
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
 import { decode as decodeNsec } from 'nostr-tools/nip19';
@@ -143,6 +143,11 @@ async function handleRequest(data) {
     if (req.method === 'unwrap_gift_wrap') {
       const p = req.params || {};
       if (!p.event) return JSON.stringify({ error: 'Missing required field: event' });
+      const rl = checkRate('__crypto_ops');
+      if (!rl.allowed) {
+        logAlert(`unwrap_gift_wrap rate-limited: ${rl.error}`);
+        return JSON.stringify({ error: rl.error });
+      }
       try {
         const rumor = nip17Unwrap(p.event, secretKeyHex);
         return JSON.stringify({ rumor });
@@ -154,6 +159,11 @@ async function handleRequest(data) {
     if (req.method === 'wrap_dm') {
       const p = req.params || {};
       if (!p.recipientPubkey) return JSON.stringify({ error: 'Missing required field: recipientPubkey' });
+      const rl = checkRate('__crypto_ops');
+      if (!rl.allowed) {
+        logAlert(`wrap_dm rate-limited: ${rl.error}`);
+        return JSON.stringify({ error: rl.error });
+      }
       if (p.message === undefined) return JSON.stringify({ error: 'Missing required field: message' });
       try {
         const recipients = [{ publicKey: p.recipientPubkey }];
@@ -168,6 +178,8 @@ async function handleRequest(data) {
       const p = req.params || {};
       if (!p.plaintext) return JSON.stringify({ error: 'Missing required field: plaintext' });
       if (!p.peer_pubkey) return JSON.stringify({ error: 'Missing required field: peer_pubkey' });
+      const rl = checkRate('__crypto_ops');
+      if (!rl.allowed) return JSON.stringify({ result: null, error: rl.error });
       try {
         const convKey = nip44.v2.utils.getConversationKey(secretKeyHex, p.peer_pubkey);
         const ciphertext = nip44.v2.encrypt(p.plaintext, convKey);
@@ -181,6 +193,8 @@ async function handleRequest(data) {
       const p = req.params || {};
       if (!p.ciphertext) return JSON.stringify({ error: 'Missing required field: ciphertext' });
       if (!p.peer_pubkey) return JSON.stringify({ error: 'Missing required field: peer_pubkey' });
+      const rl = checkRate('__crypto_ops');
+      if (!rl.allowed) return JSON.stringify({ result: null, error: rl.error });
       try {
         const convKey = nip44.v2.utils.getConversationKey(secretKeyHex, p.peer_pubkey);
         const plaintext = nip44.v2.decrypt(p.ciphertext, convKey);
@@ -230,23 +244,49 @@ const server = createServer((conn) => {
   conn.setEncoding('utf8');
   conn.on('data', async (chunk) => {
     buf += chunk;
-    // Process when we get a complete JSON object (ends with } or newline)
-    if (buf.trimEnd().endsWith('}')) {
-      const input = buf;
-      buf = '';
+    // Newline-delimited JSON framing: process each complete line
+    const lines = buf.split('\n');
+    buf = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
       try {
-        const response = await handleRequest(input);
-        conn.end(response + '\n');
+        const response = await handleRequest(trimmed);
+        conn.write(response + '\n');
       } catch (err) {
-        conn.end(JSON.stringify({ error: err.message }) + '\n');
+        conn.write(JSON.stringify({ error: err.message }) + '\n');
       }
+    }
+    // Fallback: if client sends JSON without trailing newline (legacy), detect complete object
+    if (buf.length > 0) {
+      try {
+        JSON.parse(buf);
+        const input = buf;
+        buf = '';
+        try {
+          const response = await handleRequest(input);
+          conn.end(response + '\n');
+        } catch (err) {
+          conn.end(JSON.stringify({ error: err.message }) + '\n');
+        }
+      } catch {
+        // Incomplete JSON, wait for more data
+      }
+    }
+  });
+  conn.on('end', () => {
+    // Process any remaining data in buffer
+    if (buf.trim()) {
+      handleRequest(buf.trim()).then(
+        (response) => { /* connection already ended */ },
+        () => { /* swallow */ }
+      );
     }
   });
 });
 
 server.listen(SOCKET_PATH, () => {
-  // Set socket permissions to owner-only
-  execSync(`chmod 600 ${SOCKET_PATH}`);
+  chmodSync(SOCKET_PATH, 0o600);
   console.log(`[nostr-signer] Listening on ${SOCKET_PATH}`);
   console.log(`[nostr-signer] Session management: enabled`);
   console.log(`[nostr-signer] Rate limiting: enabled (10/min, 100/hr)`);

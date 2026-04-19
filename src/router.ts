@@ -239,10 +239,38 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
 
 /**
  * Pick the matching agent for an inbound event.
- * Currently: highest priority agent. Future: trigger rule matching.
+ * Applies trigger_rules: if an agent requires a trigger pattern and the
+ * message doesn't match, that agent is skipped.
  */
-function pickAgent(agents: MessagingGroupAgent[], _event: InboundEvent): MessagingGroupAgent | null {
-  // Agents are already ordered by priority DESC from the DB query
-  // TODO: apply trigger_rules matching (pattern, mentionOnly, etc.)
-  return agents[0] ?? null;
+function pickAgent(agents: MessagingGroupAgent[], event: InboundEvent): MessagingGroupAgent | null {
+  let messageText = '';
+  try {
+    const parsed = JSON.parse(event.message.content);
+    messageText = parsed.text ?? parsed.content ?? '';
+  } catch {
+    messageText = event.message.content ?? '';
+  }
+
+  for (const agent of agents) {
+    if (!agent.trigger_rules) return agent;
+
+    let rules: { pattern?: string; requiresTrigger?: boolean };
+    try {
+      rules = JSON.parse(agent.trigger_rules);
+    } catch {
+      return agent;
+    }
+
+    if (!rules.requiresTrigger) return agent;
+
+    if (rules.pattern) {
+      const pattern = rules.pattern.replace(/^@/, '');
+      const triggerRe = new RegExp(`(^|\\s)(@|at\\s+)${pattern}\\b`, 'i');
+      if (triggerRe.test(messageText)) return agent;
+    }
+
+    // Trigger required but not matched — skip this agent
+    continue;
+  }
+  return null;
 }

@@ -68,7 +68,9 @@ function createNostrDMAdapter(): ChannelAdapter | null {
   let connected = false;
   let ownPubkey = '';
   let outgoingQueue: Array<{ platformId: string; text: string }> = [];
+  const MAX_OUTGOING_QUEUE = 100;
   let seenIds = new Set<string>();
+  let lastEventTimestamp = Math.floor(Date.now() / 1000) - 300;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
   let subCloser: { close: () => void } | null = null;
@@ -79,7 +81,7 @@ function createNostrDMAdapter(): ChannelAdapter | null {
     if (!pool) return;
     subCloser = pool.subscribeMany(
       NOSTR_DM_RELAYS,
-      { kinds: [1059], '#p': [ownPubkey] },
+      { kinds: [1059], '#p': [ownPubkey], since: lastEventTimestamp },
       {
         onevent: (event: NostrEvent) => {
           handleGiftWrap(event).catch((err) => log.error('Error handling Nostr gift wrap', { err }));
@@ -96,6 +98,9 @@ function createNostrDMAdapter(): ChannelAdapter | null {
   async function handleGiftWrap(event: NostrEvent): Promise<void> {
     if (seenIds.has(event.id)) return;
     seenIds.add(event.id);
+    if (event.created_at > lastEventTimestamp) {
+      lastEventTimestamp = event.created_at;
+    }
     if (seenIds.size > 10000) {
       const arr = [...seenIds];
       seenIds = new Set(arr.slice(-5000));
@@ -334,6 +339,13 @@ function createNostrDMAdapter(): ChannelAdapter | null {
       if (!text) return undefined;
 
       if (!connected || !pool) {
+        if (outgoingQueue.length >= MAX_OUTGOING_QUEUE) {
+          log.error('Nostr DM outgoing queue full, dropping oldest message', {
+            platformId,
+            queueSize: outgoingQueue.length,
+          });
+          outgoingQueue.shift();
+        }
         outgoingQueue.push({ platformId, text });
         log.info('Nostr DM channel disconnected, message queued', { platformId, queueSize: outgoingQueue.length });
         return undefined;
@@ -360,7 +372,7 @@ function createNostrDMAdapter(): ChannelAdapter | null {
 const registration: ChannelRegistration = {
   factory: createNostrDMAdapter,
   containerConfig: {
-    mounts: [{ hostPath: '/run/nostr/signer.sock', containerPath: '/run/nostr/signer.sock', readonly: false }],
+    mounts: [{ hostPath: NOSTR_SIGNER_SOCKET, containerPath: '/run/nostr/signer.sock', readonly: false }],
   },
 };
 
