@@ -1,148 +1,144 @@
 ---
 name: add-voice-transcription
-description: Add voice message transcription to NanoClaw using OpenAI's Whisper API. Automatically transcribes WhatsApp voice notes so the agent can read and respond to them.
+description: Add voice message transcription to NanoClaw V2. Local whisper.cpp first, OpenAI Whisper API fallback. Works with any channel (Signal, Watch, WhatsApp, Telegram). Linux and macOS.
 ---
 
-# Add Voice Transcription
+# Add Voice Transcription (V2)
 
-This skill adds automatic voice message transcription to NanoClaw's WhatsApp channel using OpenAI's Whisper API. When a voice note arrives, it is downloaded, transcribed, and delivered to the agent as `[Voice: <transcript>]`.
+Automatic voice message transcription for NanoClaw V2. Uses local whisper.cpp for zero-cost, zero-latency transcription with automatic fallback to OpenAI's Whisper API if local transcription fails.
 
-## Phase 1: Pre-flight
+**Channel-agnostic:** Works with any channel adapter that passes audio files through `transcribeAudio()` — Signal, T-Watch, WhatsApp, Telegram, or any future channel.
 
-### Check if already applied
+**Supersedes:** The V1 `add-voice-transcription` (OpenAI-only) and `use-local-whisper` (macOS-only) skills. This V2 version combines both into one module that works on Linux and macOS.
 
-Check if `src/transcription.ts` exists. If it does, skip to Phase 3 (Configure). The code changes are already in place.
+## Prerequisites
 
-### Ask the user
+### ffmpeg (required)
 
-Use `AskUserQuestion` to collect information:
-
-AskUserQuestion: Do you have an OpenAI API key for Whisper transcription?
-
-If yes, collect it now. If no, direct them to create one at https://platform.openai.com/api-keys.
-
-## Phase 2: Apply Code Changes
-
-**Prerequisite:** WhatsApp must be installed first (`skill/whatsapp` merged). This skill modifies WhatsApp channel files.
-
-### Ensure WhatsApp fork remote
+Converts audio formats to WAV for Whisper:
 
 ```bash
-git remote -v
+# Debian/Ubuntu
+sudo apt install -y ffmpeg
+# macOS
+brew install ffmpeg
 ```
 
-If `whatsapp` is missing, add it:
+### whisper.cpp (recommended — free, local, fast)
 
 ```bash
-git remote add whatsapp https://github.com/qwibitai/nanoclaw-whatsapp.git
+# Option A: Build from source (Linux)
+git clone https://github.com/ggerganov/whisper.cpp.git
+cd whisper.cpp && cmake -B build && cmake --build build --config Release
+cp build/bin/whisper-cli ~/.local/bin/
+
+# Option B: Homebrew (macOS)
+brew install whisper-cpp
 ```
 
-### Merge the skill branch
+Download a model:
 
 ```bash
-git fetch whatsapp skill/voice-transcription
-git merge whatsapp/skill/voice-transcription || {
-  git checkout --theirs package-lock.json
-  git add package-lock.json
-  git merge --continue
-}
+mkdir -p ~/.local/share/whisper/models
+curl -fsSL https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin \
+  -o ~/.local/share/whisper/models/ggml-base.en.bin
 ```
 
-This merges in:
-- `src/transcription.ts` (voice transcription module using OpenAI Whisper)
-- Voice handling in `src/channels/whatsapp.ts` (isVoiceMessage check, transcribeAudioMessage call)
-- Transcription tests in `src/channels/whatsapp.test.ts`
-- `openai` npm dependency in `package.json`
-- `OPENAI_API_KEY` in `.env.example`
+`ggml-base.en` (142MB) is the recommended starting point — fast and accurate for English. For multilingual, use `ggml-base` (no `.en` suffix).
 
-If the merge reports conflicts, resolve them by reading the conflicted files and understanding the intent of both sides.
+### OpenAI API key (optional fallback)
 
-### Validate code changes
+If local Whisper isn't installed, transcription falls back to OpenAI Whisper API:
 
 ```bash
-npm install --legacy-peer-deps
-npm run build
-npx vitest run src/channels/whatsapp.test.ts
+# Add to .env
+OPENAI_API_KEY=sk-your-key-here
 ```
 
-All tests must pass and build must be clean before proceeding.
+Without either whisper-cli or OPENAI_API_KEY, voice messages are delivered as raw audio with no transcript.
 
-## Phase 3: Configure
+## Install
 
-### Get OpenAI API key (if needed)
-
-If the user doesn't have an API key:
-
-> I need you to create an OpenAI API key:
->
-> 1. Go to https://platform.openai.com/api-keys
-> 2. Click "Create new secret key"
-> 3. Give it a name (e.g., "NanoClaw Transcription")
-> 4. Copy the key (starts with `sk-`)
->
-> Cost: ~$0.006 per minute of audio (~$0.003 per typical 30-second voice note)
-
-Wait for the user to provide the key.
-
-### Add to environment
-
-Add to `.env`:
+### Phase 1: Pre-flight
 
 ```bash
-OPENAI_API_KEY=<their-key>
+test -f src/transcription.ts && echo "Already installed" || echo "Ready to install"
 ```
 
-Sync to container environment:
+### Phase 2: Apply
 
 ```bash
-mkdir -p data/env && cp .env data/env/env
+git fetch origin skill/voice-transcription-v2
+git checkout origin/skill/voice-transcription-v2 -- src/transcription.ts
 ```
 
-The container reads environment from `data/env/env`, not `.env` directly.
+Add config exports to `src/config.ts` (inside the `readEnvFile` call and as exports):
 
-### Build and restart
+```typescript
+// In the readEnvFile array, add:
+'WHISPER_BIN',
+'WHISPER_MODEL',
+
+// Add exports:
+export const WHISPER_BIN =
+  process.env.WHISPER_BIN ?? envConfig.WHISPER_BIN ?? path.join(HOME_DIR, '.local', 'bin', 'whisper-cli');
+export const WHISPER_MODEL =
+  process.env.WHISPER_MODEL ??
+  envConfig.WHISPER_MODEL ??
+  path.join(HOME_DIR, '.local', 'share', 'whisper', 'models', 'ggml-base.en.bin');
+```
+
+No npm dependencies needed if using local Whisper only. For the OpenAI fallback, `openai` is already in NanoClaw's dependencies.
+
+### Phase 3: Build and restart
 
 ```bash
-npm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# Linux: systemctl --user restart nanoclaw
+pnpm run build
+systemctl --user restart nanoclaw     # Linux
+# launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
 ```
 
-## Phase 4: Verify
+## Verify
 
-### Test with a voice note
-
-Tell the user:
-
-> Send a voice note in any registered WhatsApp chat. The agent should receive it as `[Voice: <transcript>]` and respond to its content.
-
-### Check logs if needed
+Send a voice note via any connected channel. Check logs:
 
 ```bash
-tail -f logs/nanoclaw.log | grep -i voice
+tail -f logs/nanoclaw.log | grep -i "transcrib"
 ```
 
-Look for:
-- `Transcribed voice message` — successful transcription with character count
-- `OPENAI_API_KEY not set` — key missing from `.env`
-- `OpenAI transcription failed` — API error (check key validity, billing)
-- `Failed to download audio message` — media download issue
+You should see either `Transcribed locally` or `Local whisper failed, falling back to OpenAI`.
+
+## How it works
+
+```
+Voice note arrives (any channel)
+  -> transcribeAudio(filePath)
+  -> toWav() via ffmpeg (16kHz mono WAV)
+  -> Try local whisper-cli (WHISPER_BIN + WHISPER_MODEL)
+  -> On failure: fall back to OpenAI Whisper API
+  -> Return transcript text to channel adapter
+```
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WHISPER_BIN` | `~/.local/bin/whisper-cli` | Path to whisper.cpp binary. Empty = skip local. |
+| `WHISPER_MODEL` | `~/.local/share/whisper/models/ggml-base.en.bin` | Path to GGML model file |
+| `OPENAI_API_KEY` | (none) | OpenAI API key for Whisper fallback |
 
 ## Troubleshooting
 
-### Voice notes show "[Voice Message - transcription unavailable]"
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| No transcript | Neither whisper-cli nor OPENAI_API_KEY | Install whisper.cpp or set API key |
+| `ffmpeg: not found` | ffmpeg not installed | `sudo apt install ffmpeg` |
+| Garbled transcript | Model too small | Try `ggml-small.en` for better accuracy |
 
-1. Check `OPENAI_API_KEY` is set in `.env` AND synced to `data/env/env`
-2. Verify key works: `curl -s https://api.openai.com/v1/models -H "Authorization: Bearer $OPENAI_API_KEY" | head -c 200`
-3. Check OpenAI billing — Whisper requires a funded account
+## Removal
 
-### Voice notes show "[Voice Message - transcription failed]"
-
-Check logs for the specific error. Common causes:
-- Network timeout — transient, will work on next message
-- Invalid API key — regenerate at https://platform.openai.com/api-keys
-- Rate limiting — wait and retry
-
-### Agent doesn't respond to voice notes
-
-Verify the chat is registered and the agent is running. Voice transcription only runs for registered groups.
+```bash
+rm src/transcription.ts
+# Remove WHISPER_BIN, WHISPER_MODEL exports from src/config.ts
+pnpm run build
+```
