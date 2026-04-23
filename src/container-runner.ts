@@ -371,6 +371,10 @@ async function buildContainerArgs(
     // and resolved by the agent-runner from these env vars at MCP-spawn time.
     'PROTON_BRIDGE_USERNAME',
     'PROTON_BRIDGE_PASSWORD',
+    // MoltBook API key. Previously in groups/main/config/moltbook_credentials.json
+    // read by tools/skills/moltbook at runtime. The skill binary now prefers
+    // the env var and only falls back to the file for local/dev setups.
+    'MOLTBOOK_API_KEY',
   ]);
   if (agentGroup.folder === 'main') {
     for (const [key, value] of Object.entries(mainSecrets)) {
@@ -414,7 +418,19 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  // Symlink any executable skill binaries into a user-writable PATH dir before
+  // launching bun. Skills that ship a binary (e.g. moltbook) get auto-exposed
+  // as shell commands without needing to bake entries into the base image.
+  // `~/.local/bin` is already on PATH for the node user.
+  const bootstrap = [
+    'mkdir -p ~/.local/bin',
+    'for f in /home/node/.claude/skills/*/*; do ' +
+      '[ -x "$f" ] && [ ! -d "$f" ] && ln -sf "$f" "$HOME/.local/bin/$(basename "$f")"; ' +
+      'done 2>/dev/null || true',
+    'export PATH="$HOME/.local/bin:$PATH"',
+    'exec bun run /app/src/index.ts',
+  ].join('; ');
+  args.push('-c', bootstrap);
 
   return args;
 }
