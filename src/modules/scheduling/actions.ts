@@ -5,21 +5,29 @@
  * schedule_task / cancel_task / etc. via MCP, the container writes a
  * `kind='system'` outbound message with an `action` field. The delivery path
  * reaches into this module via the delivery-action registry and we apply the
- * change to inbound.db here.
+ * change to the central DB here.
  */
 import type Database from 'better-sqlite3';
 
 import { wakeContainer } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
+import { getDb } from '../../db/connection.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { cancelTask, insertTask, pauseTask, resumeTask, updateTask, type TaskUpdate } from './db.js';
+import {
+  insertCentralTask,
+  cancelCentralTask,
+  pauseCentralTask,
+  resumeCentralTask,
+  updateCentralTask,
+  type CentralTaskUpdate,
+} from './central-db.js';
 
 export async function handleScheduleTask(
   content: Record<string, unknown>,
   _session: Session,
-  inDb: Database.Database,
+  _inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
   const prompt = content.prompt as string;
@@ -27,14 +35,16 @@ export async function handleScheduleTask(
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
 
-  insertTask(inDb, {
+  const centralDb = getDb();
+  insertCentralTask(centralDb, {
     id: taskId,
+    prompt,
+    script,
     processAfter,
     recurrence,
     platformId: (content.platformId as string) ?? null,
     channelType: (content.channelType as string) ?? null,
     threadId: (content.threadId as string) ?? null,
-    content: JSON.stringify({ prompt, script }),
   });
   log.info('Scheduled task created', { taskId, processAfter, recurrence });
 }
@@ -42,40 +52,43 @@ export async function handleScheduleTask(
 export async function handleCancelTask(
   content: Record<string, unknown>,
   _session: Session,
-  inDb: Database.Database,
+  _inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  cancelTask(inDb, taskId);
+  const centralDb = getDb();
+  cancelCentralTask(centralDb, taskId);
   log.info('Task cancelled', { taskId });
 }
 
 export async function handlePauseTask(
   content: Record<string, unknown>,
   _session: Session,
-  inDb: Database.Database,
+  _inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  pauseTask(inDb, taskId);
+  const centralDb = getDb();
+  pauseCentralTask(centralDb, taskId);
   log.info('Task paused', { taskId });
 }
 
 export async function handleResumeTask(
   content: Record<string, unknown>,
   _session: Session,
-  inDb: Database.Database,
+  _inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  resumeTask(inDb, taskId);
+  const centralDb = getDb();
+  resumeCentralTask(centralDb, taskId);
   log.info('Task resumed', { taskId });
 }
 
 export async function handleUpdateTask(
   content: Record<string, unknown>,
   session: Session,
-  inDb: Database.Database,
+  _inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
-  const update: TaskUpdate = {};
+  const update: CentralTaskUpdate = {};
   if (typeof content.prompt === 'string') update.prompt = content.prompt;
   if (typeof content.processAfter === 'string') update.processAfter = content.processAfter;
   if (content.recurrence === null || typeof content.recurrence === 'string') {
@@ -84,7 +97,8 @@ export async function handleUpdateTask(
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
   }
-  const touched = updateTask(inDb, taskId, update);
+  const centralDb = getDb();
+  const touched = updateCentralTask(centralDb, taskId, update);
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
   if (touched === 0) {
     // Notify the agent that update_task matched nothing. Replicates the
