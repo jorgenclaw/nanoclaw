@@ -351,7 +351,10 @@ async function buildContainerArgs(
     // Policy load failure shouldn't block container spawn
   }
 
-  // Main-group-only env vars from .env (GitHub, AWS, OpenAI)
+  // Main-group-only env vars from .env. Secrets listed here are injected
+  // as container env vars at spawn time, rather than stored in container.json
+  // (readable from inside the agent's workspace) or per-group config files.
+  // The agent never sees raw values in config files — only the process env.
   const mainSecrets = readEnvFile([
     'GH_TOKEN',
     'AWS_ACCESS_KEY_ID',
@@ -360,6 +363,14 @@ async function buildContainerArgs(
     'REMOTION_AWS_BUCKET',
     'REMOTION_SERVE_URL',
     'OPENAI_API_KEY',
+    'UDIOAPI_PRO_KEY',
+    // Lightning wallet (NWC). Previously in groups/main/config/nwc.json.
+    'NWC_CONNECTION_STRING',
+    // Proton Bridge auth (IMAP/SMTP). Previously hardcoded in container.json
+    // mcpServers.proton.env — now referenced as ${VAR} placeholders there
+    // and resolved by the agent-runner from these env vars at MCP-spawn time.
+    'PROTON_BRIDGE_USERNAME',
+    'PROTON_BRIDGE_PASSWORD',
   ]);
   if (agentGroup.folder === 'main') {
     for (const [key, value] of Object.entries(mainSecrets)) {

@@ -95,6 +95,16 @@ async function main(): Promise<void> {
     try {
       const additional = JSON.parse(process.env.NANOCLAW_MCP_SERVERS) as Record<string, { command: string; args: string[]; env: Record<string, string> }>;
       for (const [name, config] of Object.entries(additional)) {
+        // Resolve ${VAR} placeholders in env values from the container's own
+        // env (host-injected at container-spawn time). Lets container.json
+        // reference secrets without storing them in the config file itself.
+        if (config.env) {
+          for (const [k, v] of Object.entries(config.env)) {
+            if (typeof v === 'string') {
+              config.env[k] = v.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_, varName) => process.env[varName] || '');
+            }
+          }
+        }
         mcpServers[name] = config;
         log(`Additional MCP server: ${name} (${config.command})`);
       }

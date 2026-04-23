@@ -36,18 +36,31 @@ useWebSocketImplementation(WebSocket);
 
 // --- Config ---
 
-const CONFIG_PATH = process.env.NWC_CONFIG || '/workspace/group/config/nwc.json';
-const SPENDING_PATH = process.env.NWC_SPENDING || '/workspace/group/config/spending.json';
+const CONFIG_PATH = process.env.NWC_CONFIG || '/workspace/agent/config/nwc.json';
+const SPENDING_PATH = process.env.NWC_SPENDING || '/workspace/agent/config/spending.json';
 const SIGNER_SOCKET = process.env.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
 const PRICE_CACHE_MAX_AGE = 5 * 60 * 1000; // 5 minutes
 
+// Config resolution: env vars win over config file. Lets the host inject the
+// connection string at container-spawn time (host .env → container env) so
+// the secret never lives in a file readable from inside the agent's workspace.
+// File-based config remains supported as a fallback for local/dev usage.
 let config;
-try {
-  config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
-} catch (err) {
-  console.error(`Error: Cannot read NWC config at ${CONFIG_PATH}`);
-  console.error('Create the file with: {"connectionString": "nostr+walletconnect://...", "dailyCapSats": 10000, "perTransactionCapSats": 5000, "confirmAboveSats": 1000}');
-  process.exit(1);
+if (process.env.NWC_CONNECTION_STRING) {
+  config = {
+    connectionString: process.env.NWC_CONNECTION_STRING,
+    dailyCapSats: process.env.NWC_DAILY_CAP_SATS ? Number(process.env.NWC_DAILY_CAP_SATS) : undefined,
+    perTransactionCapSats: process.env.NWC_PER_TRANSACTION_CAP_SATS ? Number(process.env.NWC_PER_TRANSACTION_CAP_SATS) : undefined,
+    confirmAboveSats: process.env.NWC_CONFIRM_ABOVE_SATS ? Number(process.env.NWC_CONFIRM_ABOVE_SATS) : undefined,
+  };
+} else {
+  try {
+    config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+  } catch (err) {
+    console.error(`Error: No NWC_CONNECTION_STRING env var and cannot read ${CONFIG_PATH}`);
+    console.error('Set NWC_CONNECTION_STRING env var or create the config file with: {"connectionString": "nostr+walletconnect://...", "dailyCapSats": 10000, "perTransactionCapSats": 5000, "confirmAboveSats": 1000}');
+    process.exit(1);
+  }
 }
 
 // Parse NWC connection string
