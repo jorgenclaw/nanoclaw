@@ -1,8 +1,13 @@
 import type Database from 'better-sqlite3';
 import type { Migration } from './index.js';
 
-export const migration010: Migration = {
-  version: 10,
+// Renamed from 010-token-usage.ts → 013-token-usage.ts to avoid filename
+// collision with upstream's 010-engage-modes. The runtime framework keys
+// on `name` (stored in schema_version), not filename or version field,
+// so the rename is purely cosmetic. Do NOT change `name` — would cause
+// re-application on existing installs.
+export const migration013: Migration = {
+  version: 13,
   name: 'token-usage',
   up(db: Database.Database) {
     db.exec(`

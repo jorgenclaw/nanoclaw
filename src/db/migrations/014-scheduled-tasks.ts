@@ -2,8 +2,13 @@ import type Database from 'better-sqlite3';
 
 import type { Migration } from './index.js';
 
-export const migration011: Migration = {
-  version: 11,
+// Renamed from 011-scheduled-tasks.ts → 014-scheduled-tasks.ts to avoid
+// filename collision with upstream's 011-pending-sender-approvals. The
+// runtime framework keys on `name` (stored in schema_version), not
+// filename or version field — rename is purely cosmetic. Do NOT change
+// `name` — would re-apply and fail on "table already exists".
+export const migration014: Migration = {
+  version: 14,
   name: 'scheduled-tasks-central-table',
   up(db: Database.Database) {
     db.exec(`
