@@ -11,12 +11,19 @@ store/
 data/
 logs/
 
-# Groups - never track (data lives on host, backed up to USB)
+# Groups - per-installation state, data lives on host (backed up to USB)
 groups/
+
+# Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
+# per-group memory (CLAUDE.local.md) must never be committed.
+**/CLAUDE.local.md
+**/.claude-shared.md
+**/.claude-fragments/
 
 # Secrets
 *.keys.json
 .env
+.env*
 
 # Temp files
 .tmp-*

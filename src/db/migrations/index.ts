@@ -6,6 +6,9 @@ import { migration002 } from './002-chat-sdk-state.js';
 import { moduleAgentToAgentDestinations } from './module-agent-to-agent-destinations.js';
 import { migration008 } from './008-dropped-messages.js';
 import { migration009 } from './009-drop-pending-credentials.js';
+import { migration010 } from './010-engage-modes.js';
+import { migration011 } from './011-pending-sender-approvals.js';
+import { migration012 } from './012-channel-registration.js';
 import { migration013 } from './013-token-usage.js';
 import { migration014 } from './014-scheduled-tasks.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
@@ -25,6 +28,9 @@ const migrations: Migration[] = [
   moduleApprovalsTitleOptions,
   migration008,
   migration009,
+  migration010,
+  migration011,
+  migration012,
   migration013,
   migration014,
 ];

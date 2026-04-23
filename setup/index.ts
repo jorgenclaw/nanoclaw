@@ -10,12 +10,18 @@ const STEPS: Record<
   () => Promise<{ run: (args: string[]) => Promise<void> }>
 > = {
   timezone: () => import('./timezone.js'),
+  'set-env': () => import('./set-env.js'),
   environment: () => import('./environment.js'),
   container: () => import('./container.js'),
   register: () => import('./register.js'),
+  groups: () => import('./groups.js'),
+  'whatsapp-auth': () => import('./whatsapp-auth.js'),
   mounts: () => import('./mounts.js'),
   service: () => import('./service.js'),
   verify: () => import('./verify.js'),
+  onecli: () => import('./onecli.js'),
+  auth: () => import('./auth.js'),
+  'cli-agent': () => import('./cli-agent.js'),
 };
 
 async function main(): Promise<void> {
