@@ -13,6 +13,7 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -20,8 +21,15 @@ import {
   TIMEZONE,
 } from './config.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_HOST_GATEWAY,
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { detectAuthMode } from './credential-proxy.js';
 import { readEnvFile } from './env.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -418,18 +426,48 @@ async function buildContainerArgs(
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection.
+  //
+  // IMPORTANT: Claude OAuth tokens (sk-ant-oat01-...) don't work through
+  // OneCLI's simple HTTPS proxy — they require the Claude Agent SDK's
+  // specific auth flow which our native credential proxy implements. We
+  // exclude api.anthropic.com from OneCLI and route Anthropic calls to
+  // the native proxy via ANTHROPIC_BASE_URL below. OneCLI handles the
+  // rest (future generic secrets we register for other services).
   try {
     if (agentIdentifier) {
       await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
     }
     const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
     if (onecliApplied) {
+      // The SDK emits HTTPS_PROXY/HTTP_PROXY using `host.docker.internal`,
+      // which doesn't resolve when hostGatewayArgs() picks `--network host`
+      // on bare-metal Linux. Rewrite to the docker bridge IP where OneCLI
+      // actually binds (172.17.0.1:10255) so proxying works regardless of
+      // the container's networking mode.
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === '-e' && typeof args[i + 1] === 'string' && args[i + 1].includes('host.docker.internal')) {
+          args[i + 1] = args[i + 1].replace(/host\.docker\.internal/g, '172.17.0.1');
+        }
+      }
       log.info('OneCLI gateway applied', { containerName });
     } else {
       log.warn('OneCLI gateway not applied — container will have no credentials', { containerName });
     }
   } catch (err) {
     log.warn('OneCLI gateway error — container will have no credentials', { containerName, err });
+  }
+
+  // Anthropic goes through the native credential proxy (OAuth-aware).
+  // NO_PROXY excludes api.anthropic.com from OneCLI's HTTPS_PROXY so the
+  // Claude Agent SDK's requests go directly to our proxy instead.
+  const authMode = detectAuthMode();
+  args.push('-e', `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`);
+  args.push('-e', 'NO_PROXY=api.anthropic.com,localhost,127.0.0.1');
+  args.push('-e', 'no_proxy=api.anthropic.com,localhost,127.0.0.1');
+  if (authMode === 'api-key') {
+    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  } else {
+    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder-oauth-token');
   }
 
   // Host gateway
