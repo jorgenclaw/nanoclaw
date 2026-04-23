@@ -169,7 +169,9 @@ async function sweepCentralTasks(): Promise<number | null> {
   await handleCentralRecurrence(centralDb);
 
   // 2. Find due central tasks
-  const { getDuetasks, getNextDueTime, markTaskProcessing } = await import('./modules/scheduling/central-db.js');
+  const { getDuetasks, getNextDueTime, markCentralTaskCompleted } = await import(
+    './modules/scheduling/central-db.js'
+  );
   const dueTasks = getDuetasks(centralDb);
 
   if (dueTasks.length === 0) {
@@ -223,17 +225,35 @@ async function sweepCentralTasks(): Promise<number | null> {
       }
 
       try {
-        // Insert the task into the session's inbound.db
+        // Already pushed to this session's inbound.db on a previous tick?
+        // Can happen if the container completed the row but we never marked
+        // the central row done (e.g., after a host restart). Short-circuit
+        // the re-push: mark central completed so recurrence can generate the
+        // next occurrence and we don't spin on a dead push forever.
+        const existing = inDb.prepare("SELECT status FROM messages_in WHERE id = ?").get(task.id) as
+          | { status: string }
+          | undefined;
+        if (existing) {
+          log.info('Central task already present in inbound.db, marking central completed', {
+            taskId: task.id,
+            inboundStatus: existing.status,
+          });
+          markCentralTaskCompleted(centralDb, task.id);
+          continue;
+        }
+
+        // Insert without the cron recurrence — central owns recurrence now,
+        // so we don't want the per-session handleRecurrence to also generate
+        // a follow-up row for the same series (would double-fire).
         inDb
           .prepare(
             `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id)
-             VALUES (?, ?, datetime('now'), 'pending', 0, ?, ?, 'task', ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, datetime('now'), 'pending', 0, ?, NULL, 'task', ?, ?, ?, ?, ?)`,
           )
           .run(
             task.id,
             nextEvenSeq(inDb),
             task.process_after,
-            task.recurrence,
             task.platform_id,
             task.channel_type,
             task.thread_id,
@@ -241,7 +261,12 @@ async function sweepCentralTasks(): Promise<number | null> {
             task.series_id,
           );
 
-        markTaskProcessing(centralDb, task.id);
+        // Mark central task completed so (a) we don't re-push it on the next
+        // sweep tick, (b) the central recurrence handler picks it up on the
+        // next tick and inserts the next occurrence (same series_id, new id,
+        // next cron-computed process_after).
+        markCentralTaskCompleted(centralDb, task.id);
+
         log.info('Pushed central task to session inbound.db', {
           taskId: task.id,
           sessionId: targetSession.id,
