@@ -182,10 +182,7 @@ describe('origin-session threading — outbound A2A message', () => {
 
     const sourceSession = makeSession({ id: 'sess-source', agent_group_id: 'ag-source' });
 
-    await routeAgentMessage(
-      { id: 'msg-1', platform_id: 'ag-target', content: '{"text":"hello"}' },
-      sourceSession,
-    );
+    await routeAgentMessage({ id: 'msg-1', platform_id: 'ag-target', content: '{"text":"hello"}' }, sourceSession);
 
     expect(mockResolveSession).toHaveBeenCalledWith('ag-target', null, null, 'agent-shared');
     const [, writtenSessionId] = mockWriteSessionMessage.mock.calls[0];
