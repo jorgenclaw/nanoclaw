@@ -39,3 +39,7 @@ groups/
 .nanoclaw/
 
 agents-sdk-docs
+
+# Runtime / per-host artifacts (should never be tracked)
+.claude/scheduled_tasks.lock
+.mount-rw-test
