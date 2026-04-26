@@ -39,8 +39,6 @@ import {
   getProcessingClaims,
   markMessageFailed,
   retryWithBackoff,
-  pruneCompletedTasks,
-  getNextDueTimestamp,
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
@@ -235,15 +233,10 @@ async function sweepSession(session: Session): Promise<number | null> {
     await handleRecurrence(inDb, session);
     // MODULE-HOOK:scheduling-recurrence:end
 
-    // 5. Prune old completed tasks (retain 7 days)
-    const pruned = pruneCompletedTasks(inDb);
-    if (pruned > 0) {
-      log.info('Pruned completed tasks', { sessionId: session.id, count: pruned });
-    }
-
-    // 6. Find the next future due time for precise timer scheduling
-    const nextDue = getNextDueTimestamp(inDb);
-    return nextDue ? new Date(nextDue + 'Z').getTime() : null;
+    // Per-session pruning + next-due timestamp used to live here; upstream
+    // removed those helpers during the V2 refactor. Central task sweep owns
+    // next-due computation now (sweepCentralTasks returns it).
+    return null;
   } finally {
     inDb.close();
     outDb?.close();
@@ -258,9 +251,7 @@ async function sweepCentralTasks(): Promise<number | null> {
   await handleCentralRecurrence(centralDb);
 
   // 2. Find due central tasks
-  const { getDuetasks, getNextDueTime, markCentralTaskCompleted } = await import(
-    './modules/scheduling/central-db.js'
-  );
+  const { getDuetasks, getNextDueTime, markCentralTaskCompleted } = await import('./modules/scheduling/central-db.js');
   const dueTasks = getDuetasks(centralDb);
 
   if (dueTasks.length === 0) {
@@ -275,25 +266,69 @@ async function sweepCentralTasks(): Promise<number | null> {
     sessionMap.set(session.id, session);
   }
 
+  const { getMessagingGroupByPlatform, getMessagingGroupAgents } = await import('./db/messaging-groups.js');
+  const { getAgentGroupByFolder } = await import('./db/agent-groups.js');
+
   for (const task of dueTasks) {
     try {
-      // Find a session that matches this task's destination
+      // Resolve the session by the task's declared destination.
+      // Real channels (signal/watch/whitenoise/nostr-dm/...) → look up the
+      // messaging_group and find an active session bound to it whose
+      // agent_group is wired to that messaging_group.
+      // Pseudo-channels: 'agent' (platform_id = agent group folder) and
+      // 'system' (no chat output) are routed by agent group.
       let targetSession: Session | undefined;
 
-      // If the task has platform_id and channel_type, find a session with that messaging group
-      if (task.platform_id && task.channel_type) {
-        targetSession = sessions.find(
-          (s) => s.messaging_group_id && s.agent_group_id === s.agent_group_id, // basic validation
-        );
+      if (task.platform_id && task.channel_type && task.channel_type !== 'agent' && task.channel_type !== 'system') {
+        const mg = getMessagingGroupByPlatform(task.channel_type, task.platform_id);
+        if (!mg) {
+          log.warn('No messaging_group for scheduled task destination — skipping', {
+            taskId: task.id,
+            channel_type: task.channel_type,
+            platform_id: task.platform_id,
+          });
+          continue;
+        }
+        const wiredAgentIds = new Set(getMessagingGroupAgents(mg.id).map((w) => w.agent_group_id));
+        targetSession = sessions.find((s) => s.messaging_group_id === mg.id && wiredAgentIds.has(s.agent_group_id));
+        if (!targetSession) {
+          log.warn('No active session for scheduled task destination', {
+            taskId: task.id,
+            channel_type: task.channel_type,
+            platform_id: task.platform_id,
+            messagingGroupId: mg.id,
+            wiredAgentGroupIds: [...wiredAgentIds],
+          });
+          continue;
+        }
+      } else if (task.channel_type === 'agent' && task.platform_id) {
+        // platform_id is the target agent group's folder (e.g. 'main', 'frame').
+        const ag = getAgentGroupByFolder(task.platform_id);
+        if (!ag) {
+          log.warn('No agent group for scheduled task agent-destination', {
+            taskId: task.id,
+            folder: task.platform_id,
+          });
+          continue;
+        }
+        const candidates = sessions.filter((s) => s.agent_group_id === ag.id);
+        // Prefer a background session (no messaging_group); fall back to any active session.
+        targetSession = candidates.find((s) => !s.messaging_group_id) ?? candidates[0];
+      } else if (task.channel_type === 'system') {
+        // System tasks run in the main agent group's background session.
+        const main = getAgentGroupByFolder('main');
+        if (main) {
+          const candidates = sessions.filter((s) => s.agent_group_id === main.id);
+          targetSession = candidates.find((s) => !s.messaging_group_id) ?? candidates[0];
+        }
       }
 
-      // If no specific session found, use the main session for the agent group
       if (!targetSession) {
-        targetSession = sessions.find((s) => s.agent_group_id === s.agent_group_id);
-      }
-
-      if (!targetSession) {
-        log.warn('No target session found for central task', { taskId: task.id });
+        log.warn('No target session found for central task', {
+          taskId: task.id,
+          channel_type: task.channel_type,
+          platform_id: task.platform_id,
+        });
         continue;
       }
 
@@ -319,7 +354,7 @@ async function sweepCentralTasks(): Promise<number | null> {
         // the central row done (e.g., after a host restart). Short-circuit
         // the re-push: mark central completed so recurrence can generate the
         // next occurrence and we don't spin on a dead push forever.
-        const existing = inDb.prepare("SELECT status FROM messages_in WHERE id = ?").get(task.id) as
+        const existing = inDb.prepare('SELECT status FROM messages_in WHERE id = ?').get(task.id) as
           | { status: string }
           | undefined;
         if (existing) {
