@@ -10,6 +10,40 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
+# ---- Stage 1: build whisper.cpp ---------------------------------------------
+# whisper.cpp is built from source so we get the actual whisper-cli binary
+# (the npm package "whisper-cli" is unrelated — it wraps OpenAI's API and
+# defeats sovereignty). RPATH=$ORIGIN/../lib lets the binary find its sibling
+# libs without LD_LIBRARY_PATH gymnastics in the runtime stage.
+FROM debian:bookworm-slim AS whisper-builder
+ARG WHISPER_CPP_VERSION=v1.8.3
+ARG WHISPER_MODEL_FILE=ggml-base.en.bin
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        build-essential \
+        libssl-dev \
+        pkg-config \
+        git \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch ${WHISPER_CPP_VERSION} \
+        https://github.com/ggerganov/whisper.cpp.git /src/whisper.cpp
+RUN cd /src/whisper.cpp && \
+    cmake -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_INSTALL_PREFIX=/whisper-install \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib' \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=TRUE && \
+    cmake --build build -j --config Release && \
+    cmake --install build
+RUN mkdir -p /whisper-install/share && \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 300 -C - \
+        -o /whisper-install/share/${WHISPER_MODEL_FILE} \
+        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${WHISPER_MODEL_FILE}
+
+# ---- Stage 2: runtime --------------------------------------------------------
 FROM node:22-slim
 
 # ---- Build-time arguments ----------------------------------------------------
@@ -23,7 +57,8 @@ ARG CLAUDE_CODE_VERSION=2.1.116
 ARG AGENT_BROWSER_VERSION=latest
 ARG VERCEL_VERSION=latest
 ARG BUN_VERSION=1.3.12
-ARG WHISPER_CLI_VERSION=1.7.5
+ARG WS_VERSION=8.20.0
+ARG WHISPER_MODEL_FILE=ggml-base.en.bin
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -103,15 +138,25 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
 
+# ws: install globally then symlink to /node_modules so ESM `import 'ws'` resolves
+# from any working directory. ESM walks the directory tree upward; only /node_modules
+# at the root is universally reachable regardless of cwd.
+RUN npm install -g "ws@${WS_VERSION}" && \
+    mkdir -p /node_modules && \
+    ln -s /usr/local/lib/node_modules/ws /node_modules/ws
+
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
-# whisper-cli: local Whisper transcription binary. Container-side voice
-# transcription tries this first before any external API fallback. Pinned to
-# satisfy the supply-chain policy and so model files stay compatible with the
-# binary version. ffmpeg (above) handles audio normalization before invocation.
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "whisper-cli@${WHISPER_CLI_VERSION}"
+# ---- whisper.cpp from builder stage -----------------------------------------
+# Container-side voice transcription, sovereign by default. Audio attachments
+# get transcribed inside the container via local Whisper; OpenAI fallback is
+# off unless explicitly enabled (WHISPER_OPENAI_FALLBACK=true).
+COPY --from=whisper-builder /whisper-install/bin/whisper-cli /usr/local/bin/whisper-cli
+COPY --from=whisper-builder /whisper-install/lib/ /usr/local/lib/
+COPY --from=whisper-builder /whisper-install/share/${WHISPER_MODEL_FILE} /whisper/model.bin
+RUN ldconfig
+ENV WHISPER_MODEL_PATH=/whisper/model.bin
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
