@@ -37,6 +37,11 @@ import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+// Channel host-side config barrel — channels that ship container-side
+// infrastructure (e.g. nostr-dm's signing-socket bind-mount) self-register
+// on import.
+import './channels/index.js';
+import { getChannelContainerConfig, getRegisteredChannelNames } from './channels/channel-registry.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -212,6 +217,7 @@ function resolveProviderContribution(
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
         hostEnv: process.env,
+        containerEnv: containerConfig.env || {},
       })
     : {};
   return { provider, contribution };
@@ -302,6 +308,26 @@ function buildMounts(
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
     mounts.push(...validated);
+  }
+
+  // Channel-contributed mounts (e.g. nostr-dm's signing socket + clawstr-post).
+  // Applied to every container regardless of whether the channel is wired to
+  // the agent group — these are cross-cutting tools (clawstr-post, signer
+  // socket) that any agent may invoke. Missing host paths are skipped so a
+  // stale registration can't break unrelated containers.
+  for (const name of getRegisteredChannelNames()) {
+    const cfg = getChannelContainerConfig(name);
+    if (!cfg?.mounts) continue;
+    for (const m of cfg.mounts) {
+      if (!fs.existsSync(m.hostPath)) {
+        log.warn('Skipping channel mount — host path missing', {
+          channel: name,
+          hostPath: m.hostPath,
+        });
+        continue;
+      }
+      mounts.push(m);
+    }
   }
 
   // Provider-contributed mounts (e.g. opencode-xdg)
@@ -522,6 +548,20 @@ async function buildContainerArgs(
   if (agentGroup.folder === 'main') {
     for (const [key, value] of Object.entries(mainSecrets)) {
       if (value) args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Per-agent-group env overrides — applied last so they win over OneCLI / native-proxy / mainSecrets.
+  if (containerConfig.env) {
+    for (const [key, value] of Object.entries(containerConfig.env)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Blocked hosts: resolve to 0.0.0.0 so they are unreachable inside the container.
+  if (containerConfig.blockedHosts) {
+    for (const host of containerConfig.blockedHosts) {
+      args.push('--add-host', `${host}:0.0.0.0`);
     }
   }
 
