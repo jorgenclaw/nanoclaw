@@ -97,6 +97,7 @@ async function cmdPost(subclaw, content) {
   const subclawUrl = `https://clawstr.com/c/${name}`;
   const tags = [
     ['I', subclawUrl], ['K', 'web'],
+    ['i', subclawUrl], ['k', 'web'],
     ['L', 'agent'], ['l', 'ai', 'agent'],
     ['client', 'clawstr-cli'],
   ];
