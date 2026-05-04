@@ -3,7 +3,9 @@ import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } 
 import { writeMessageOut } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { getStoredSessionId, setStoredSessionId, clearStoredSessionId } from './db/session-state.js';
+import { getSessionRouting } from './db/session-routing.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+import { setActiveRouting } from './active-routing.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -83,6 +85,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markProcessing(ids);
 
     const routing = extractRouting(messages);
+    setActiveRouting(routing);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -142,6 +145,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
       continue;
     }
+
+    // Auto-transcribe audio attachments before formatting
+    const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+    keep = await autoTranscribeMessages(keep);
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
@@ -248,7 +255,7 @@ async function processQuery(
   // Stream liveness is decided host-side via the heartbeat file + processing
   // claim age (see src/host-sweep.ts); if something is truly stuck, the host
   // will kill the container and messages get reset to pending.
-  const pollHandle = setInterval(() => {
+  const pollHandle = setInterval(async () => {
     if (done) return;
 
     // Skip system messages (MCP tool responses) and /clear (needs fresh query).
@@ -267,7 +274,9 @@ async function processQuery(
       const newIds = newMessages.map((m) => m.id);
       markProcessing(newIds);
 
-      const prompt = formatMessages(newMessages);
+      const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+      const preprocessed = await autoTranscribeMessages(newMessages);
+      const prompt = formatMessages(preprocessed);
       log(`Pushing ${newMessages.length} follow-up message(s) into active query`);
       query.push(prompt);
 
@@ -373,9 +382,30 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
   // Single-destination shortcut: the agent wrote plain text — send to
   // the session's originating channel (from session_routing) if available,
   // otherwise fall back to the single destination.
+  //
+  // We prefer session_routing over the batch's routing context because
+  // routing is captured from the FIRST message of the initial batch
+  // (extractRouting in poll-loop). When follow-up messages get pushed
+  // into an active query, the lead-row routing leaks into their replies —
+  // e.g., a stale recurring task with a dead JID landing first causes
+  // every subsequent watch tap or DM in the same turn to be addressed
+  // back to the dead JID. session_routing is the canonical destination
+  // committed by the host for this session and never drifts.
   if (sent === 0 && scratchpad) {
+    const sessionRouting = getSessionRouting();
+    if (sessionRouting.channel_type && sessionRouting.platform_id) {
+      writeMessageOut({
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        kind: 'chat',
+        platform_id: sessionRouting.platform_id,
+        channel_type: sessionRouting.channel_type,
+        thread_id: sessionRouting.thread_id,
+        content: JSON.stringify({ text: scratchpad }),
+      });
+      return;
+    }
     if (routing.channelType && routing.platformId) {
-      // Reply to the channel/thread the message came from
       writeMessageOut({
         id: generateId(),
         in_reply_to: routing.inReplyTo,
@@ -400,6 +430,40 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
 
   if (sent === 0 && text.trim()) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    // Fallback: surface a brief notice + the internal text (truncated) to the
+    // session's originating channel so the user knows the turn silently
+    // failed. Without this the user just sees nothing back. Common with
+    // smaller models that stay inside <internal> when they hit an obstacle
+    // and never switch into <message to="..."> mode.
+    const sessionRouting = getSessionRouting();
+    const dest =
+      sessionRouting.channel_type && sessionRouting.platform_id
+        ? {
+            platformId: sessionRouting.platform_id,
+            channelType: sessionRouting.channel_type,
+            threadId: sessionRouting.thread_id,
+          }
+        : routing.channelType && routing.platformId
+          ? {
+              platformId: routing.platformId,
+              channelType: routing.channelType,
+              threadId: routing.threadId,
+            }
+          : null;
+    if (dest) {
+      const internal = text.trim();
+      const preview = internal.length > 800 ? internal.slice(0, 800) + '…' : internal;
+      const body = `⚠️ Internal-only output — I didn't produce a user-facing reply this turn. Internal text:\n\n${preview}`;
+      writeMessageOut({
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        kind: 'chat',
+        platform_id: dest.platformId,
+        channel_type: dest.channelType,
+        thread_id: dest.threadId,
+        content: JSON.stringify({ text: body }),
+      });
+    }
   }
 }
 

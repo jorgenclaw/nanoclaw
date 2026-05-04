@@ -114,6 +114,8 @@ function buildDestinationsSection(): string {
       'To mark something as scratchpad (logged but not sent), wrap it in `<internal>...</internal>`.',
       '',
       'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool.',
+      '',
+      buildNeverSilentSection(),
     ].join('\n');
   }
 
@@ -131,5 +133,22 @@ function buildDestinationsSection(): string {
   lines.push(
     'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool with the `to` parameter set to a destination name.',
   );
+  lines.push('');
+  lines.push(buildNeverSilentSection());
   return lines.join('\n');
+}
+
+function buildNeverSilentSection(): string {
+  return [
+    '### Never end a turn silently',
+    '',
+    'Every turn must produce at least one user-visible message. A turn that contains only `<internal>...</internal>` (or only tool-calls with no message at the end) is a contract violation — the user receives nothing and assumes you crashed.',
+    '',
+    'If you hit an obstacle and cannot complete the request:',
+    '- **Preferred:** call the `report_failure` MCP tool with a plain-language `reason` (1–4 sentences). It delivers the explanation to the user for you and ends the turn cleanly.',
+    '- **Or:** call `ask_user_question` if a clarification would let you proceed.',
+    '- **Or:** write your explanation as the normal user-facing message (in `<message to="...">` for multi-destination, or plain text for single-destination).',
+    '',
+    'Do **not** wrap your entire turn in `<internal>` and stop. Do **not** end a turn with only tool-calls. The user is waiting — say something to them.',
+  ].join('\n');
 }

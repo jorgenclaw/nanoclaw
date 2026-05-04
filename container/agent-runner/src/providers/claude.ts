@@ -5,6 +5,8 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
+import { writeMessageOut } from '../db/messages-out.js';
+import { getActiveRouting } from '../active-routing.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -214,6 +216,26 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
       fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
       log(`Archived conversation to ${filename}`);
+
+      // Send Signal warning before compaction
+      const routing = getActiveRouting();
+      if (routing?.platformId && routing?.channelType) {
+        try {
+          writeMessageOut({
+            id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({
+              text: `-- CONTEXT COMPACTION --\nArchived ${messages.length} messages to ${filename}.\nIf there's anything important from this session you want me to remember, tell me now — older context will be summarized.`,
+            }),
+          });
+          log('Sent pre-compaction Signal notification');
+        } catch (notifyErr) {
+          log(`Failed to send compaction notification: ${notifyErr instanceof Error ? notifyErr.message : String(notifyErr)}`);
+        }
+      }
     } catch (err) {
       log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -290,6 +312,9 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    const COMPACT_WINDOW = parseInt(CLAUDE_CODE_AUTO_COMPACT_WINDOW, 10);
+    const EARLY_WARNING_THRESHOLD = Math.floor(COMPACT_WINDOW * 0.8);
+    let earlyWarningSent = false;
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
@@ -299,6 +324,33 @@ export class ClaudeProvider implements AgentProvider {
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
+
+        // Track token usage for early warning
+        if (!earlyWarningSent && message.type === 'assistant') {
+          const usage = (message as { message?: { usage?: { input_tokens?: number } } }).message?.usage;
+          if (usage?.input_tokens && usage.input_tokens >= EARLY_WARNING_THRESHOLD) {
+            earlyWarningSent = true;
+            const pct = Math.round((usage.input_tokens / COMPACT_WINDOW) * 100);
+            const routing = getActiveRouting();
+            if (routing?.platformId && routing?.channelType) {
+              try {
+                writeMessageOut({
+                  id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  kind: 'chat',
+                  platform_id: routing.platformId,
+                  channel_type: routing.channelType,
+                  thread_id: routing.threadId,
+                  content: JSON.stringify({
+                    text: `-- CONTEXT WARNING (${pct}%) --\nContext window is ${pct}% full (${usage.input_tokens.toLocaleString()}/${COMPACT_WINDOW.toLocaleString()} tokens). Auto-compaction fires at ~92%.\nSend /compact now to compact on your terms, or tell me what to save to memory first.`,
+                  }),
+                });
+                log(`Early warning sent at ${pct}% (${usage.input_tokens} tokens)`);
+              } catch {
+                // Non-fatal
+              }
+            }
+          }
+        }
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
@@ -311,8 +363,10 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
-          const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          const tokens = meta?.pre_tokens;
+          const detail = tokens ? ` (${tokens.toLocaleString()} tokens)` : '';
+          log(`Context compacted${detail}`);
+          // Don't yield as result — the pre-compaction hook already notified the user
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };
