@@ -115,6 +115,8 @@ export const WATCH_SYNC_TIMEOUT_MS = parseInt(
   10,
 );
 export const WATCH_SIGNAL_MIRROR_JID = process.env.WATCH_SIGNAL_MIRROR_JID || envConfig.WATCH_SIGNAL_MIRROR_JID || '';
+export const WATCH_FIRMWARE_DIR =
+  process.env.WATCH_FIRMWARE_DIR || envConfig.WATCH_FIRMWARE_DIR || path.join(DATA_DIR, 'watch-firmware');
 
 // White Noise (Nostr/MLS encrypted messaging)
 export const WN_BINARY_PATH =

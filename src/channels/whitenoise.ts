@@ -5,6 +5,7 @@ import path from 'path';
 import { promisify } from 'util';
 
 import { WN_BINARY_PATH, WN_SOCKET_PATH, WN_ACCOUNT_PUBKEY } from '../config.js';
+import { getMessagingGroupsByChannel } from '../db/messaging-groups.js';
 import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
@@ -40,14 +41,14 @@ function createWhiteNoiseAdapter(): ChannelAdapter | null {
   }
 
   async function pollAllGroups(): Promise<void> {
-    const wnConversations = config.conversations.filter(
-      (c) => true, // all conversations belong to this adapter
-    );
+    // All whitenoise messaging groups — queried fresh each sweep so new
+    // registrations appear without adapter restart.
+    const wnConversations = getMessagingGroupsByChannel('whitenoise');
     if (wnConversations.length === 0) return;
 
     for (const conv of wnConversations) {
       try {
-        await pollGroup(conv.platformId);
+        await pollGroup(conv.platform_id);
         consecutiveErrors = 0;
         clearAlert('whitenoise-disconnect');
       } catch (err) {
@@ -55,7 +56,7 @@ function createWhiteNoiseAdapter(): ChannelAdapter | null {
         if (consecutiveErrors >= 3) {
           reportError('whitenoise-disconnect', `White Noise polling failed ${consecutiveErrors} times: ${err}`);
         }
-        log.warn('WN poll failed for group', { err, platformId: conv.platformId });
+        log.warn('WN poll failed for group', { err, platformId: conv.platform_id });
       }
     }
   }

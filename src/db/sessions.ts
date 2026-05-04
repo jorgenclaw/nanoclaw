@@ -52,10 +52,18 @@ export function findSessionForAgent(
     .get(agentGroupId, messagingGroupId) as Session | undefined;
 }
 
-/** Find an active session scoped to an agent group (ignoring messaging group). */
+/** Find an active session scoped to an agent group (ignoring messaging group).
+ *
+ * Ordered by `last_active DESC` (nulls last) so agent-to-agent routing targets
+ * the session the other side most recently used, not the one created latest.
+ * Without this, a main group with multiple active sessions would send inter-
+ * agent replies to the newest-created session rather than the one currently
+ * in use — see `agent-to-agent/agent-route.ts`. */
 export function findSessionByAgentGroup(agentGroupId: string): Session | undefined {
   return getDb()
-    .prepare("SELECT * FROM sessions WHERE agent_group_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1")
+    .prepare(
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND status = 'active' ORDER BY last_active IS NULL, last_active DESC, created_at DESC LIMIT 1",
+    )
     .get(agentGroupId) as Session | undefined;
 }
 

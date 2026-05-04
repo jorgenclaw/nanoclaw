@@ -26,6 +26,8 @@ export interface RoutableAgentMessage {
   id: string;
   platform_id: string | null;
   content: string;
+  /** Populated when this is a reply from an agent that received an A2A message. */
+  origin_session_id?: string | null;
 }
 
 export async function routeAgentMessage(msg: RoutableAgentMessage, session: Session): Promise<void> {
@@ -44,7 +46,35 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
   if (!getAgentGroup(targetAgentGroupId)) {
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
-  const { session: targetSession } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+
+  // If the outbound message has an origin_session_id, this is a reply back to
+  // the session that initiated the A2A conversation. Deliver there directly
+  // instead of using findSessionByAgentGroup, which may pick the wrong session
+  // when multiple active sessions exist for the same agent group.
+  let targetSession: Session;
+  if (msg.origin_session_id) {
+    const originSession = getSession(msg.origin_session_id);
+    if (originSession && originSession.agent_group_id === targetAgentGroupId && originSession.status === 'active') {
+      targetSession = originSession;
+      log.info('Agent reply threaded to origin session', {
+        from: session.agent_group_id,
+        to: targetAgentGroupId,
+        originSession: originSession.id,
+      });
+    } else {
+      // Origin session is stale or archived — fall back to best-available session.
+      log.warn('Origin session unavailable, falling back to findSessionByAgentGroup', {
+        originSessionId: msg.origin_session_id,
+        targetAgentGroupId,
+      });
+      const { session: resolved } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+      targetSession = resolved;
+    }
+  } else {
+    const { session: resolved } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+    targetSession = resolved;
+  }
+
   writeSessionMessage(targetAgentGroupId, targetSession.id, {
     id: `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
@@ -53,6 +83,7 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
     channelType: 'agent',
     threadId: null,
     content: msg.content,
+    originSessionId: session.id,
   });
   log.info('Agent message routed', {
     from: session.agent_group_id,

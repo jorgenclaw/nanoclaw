@@ -7,6 +7,7 @@ import {
   GROUPS_DIR,
   STORE_DIR,
   WATCH_AUTH_TOKEN,
+  WATCH_FIRMWARE_DIR,
   WATCH_GROUP_FOLDER,
   WATCH_HTTP_BIND,
   WATCH_HTTP_PORT,
@@ -70,8 +71,9 @@ function createWatchAdapter(): ChannelAdapter | null {
     if (!WATCH_SIGNAL_MIRROR_JID) return;
     const signalAdapter = getChannelAdapter('signal');
     if (!signalAdapter) return;
+    const platformId = WATCH_SIGNAL_MIRROR_JID.replace(/^signal:/, '');
     signalAdapter
-      .deliver(WATCH_SIGNAL_MIRROR_JID, null, {
+      .deliver(platformId, null, {
         kind: 'text',
         content: { text },
       })
@@ -208,6 +210,15 @@ function createWatchAdapter(): ChannelAdapter | null {
     }
 
     log.info('watch: inbound message', { deviceId, textLen: text.length, preview: text.slice(0, 100) });
+
+    // Find Phone: handle directly — mirror the ring message to Signal, skip the agent
+    if (text.includes('Find Phone') && text.startsWith('SYSTEM:')) {
+      mirrorToSignal('FIND MY PHONE - ring ring! 📱🔔');
+      log.info('watch: find phone — mirrored to signal');
+      sendJson(res, 200, { reply: 'Sent to Signal' });
+      return;
+    }
+
     mirrorToSignal(`⌚ [Watch] Scott: ${text}`);
     const reply = await injectAndAwaitReply(text, deviceId);
     sendJson(res, 200, { reply });
@@ -336,6 +347,33 @@ function createWatchAdapter(): ChannelAdapter | null {
       const since = url.searchParams.get('since') || '1970-01-01T00:00:00.000Z';
       const sinceMs = new Date(since).getTime();
       sendJson(res, 200, { notifications: notificationQueue.filter((n) => new Date(n.timestamp).getTime() > sinceMs) });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/watch/version') {
+      const versionFile = path.join(WATCH_FIRMWARE_DIR, 'version.json');
+      try {
+        const data = JSON.parse(fs.readFileSync(versionFile, 'utf-8'));
+        sendJson(res, 200, data);
+      } catch {
+        sendJson(res, 200, { version: 0, note: 'no firmware published' });
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/watch/firmware') {
+      const binFile = path.join(WATCH_FIRMWARE_DIR, 'firmware.bin');
+      if (!fs.existsSync(binFile)) {
+        sendJson(res, 404, { error: 'no firmware available' });
+        return;
+      }
+      const stat = fs.statSync(binFile);
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(stat.size),
+        Connection: 'close',
+      });
+      fs.createReadStream(binFile).pipe(res);
       return;
     }
 

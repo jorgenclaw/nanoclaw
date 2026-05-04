@@ -7,11 +7,8 @@ import path from 'path';
 import { ASSISTANT_NAME, SIGNAL_CLI_TCP_HOST, SIGNAL_CLI_TCP_PORT, SIGNAL_PHONE_NUMBER } from '../config.js';
 import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
-import { transcribeAudio } from '../transcription.js';
 import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
-
-const SIGNAL_CLI_ATTACHMENTS_DIR = path.join(os.homedir(), '.local', 'share', 'signal-cli', 'attachments');
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -57,6 +54,7 @@ interface SignalEnvelope {
     mentions?: SignalMention[];
     attachments?: SignalAttachment[];
     groupInfo?: { groupId?: string; type?: string };
+    groupV2?: { id?: string };
     groupContext?: { title?: string; groupId?: string };
     quote?: {
       id?: number;
@@ -72,8 +70,96 @@ interface SignalEnvelope {
       destination?: string;
       destinationNumber?: string;
       groupInfo?: { groupId?: string };
+      groupV2?: { id?: string };
     };
   };
+}
+
+/**
+ * Split long outbound messages at newline boundaries near the `limit` mark.
+ * Signal's server rejects individual messages above a size cap (empirically
+ * ~4 KB); without chunking, anything longer fails silently.
+ */
+function chunkText(text: string, limit: number): string[] {
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= limit) {
+      chunks.push(remaining);
+      break;
+    }
+    let splitAt = remaining.lastIndexOf('\n', limit);
+    if (splitAt <= 0) splitAt = limit;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).replace(/^\n/, '');
+  }
+  return chunks;
+}
+
+interface SignalTextStyle {
+  style: 'BOLD' | 'ITALIC' | 'STRIKETHROUGH' | 'MONOSPACE' | 'SPOILER';
+  start: number;
+  length: number;
+}
+
+interface StyledText {
+  text: string;
+  textStyles: SignalTextStyle[];
+}
+
+/**
+ * Convert markdown-ish input into Signal's offset-based `textStyle` ranges so
+ * `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, and `||spoiler||`
+ * render as actual Signal styling instead of leaking markup characters.
+ *
+ * Walks recursively: at each level find the leftmost matching pattern,
+ * descend into its captured inner (so nested styles like `**bold `code`**`
+ * compose correctly), then continue past the match. Style offsets are
+ * recorded against the *output* text length as it's built.
+ */
+function parseSignalStyles(input: string): StyledText {
+  const styles: SignalTextStyle[] = [];
+
+  const patterns: Array<{ regex: RegExp; style: SignalTextStyle['style'] }> = [
+    { regex: /```([\s\S]+?)```/, style: 'MONOSPACE' },
+    { regex: /`([^`]+)`/, style: 'MONOSPACE' },
+    { regex: /\*\*([^]+?)\*\*/, style: 'BOLD' },
+    { regex: /~~([^]+?)~~/, style: 'STRIKETHROUGH' },
+    { regex: /\|\|([^]+?)\|\|/, style: 'SPOILER' },
+    { regex: /\*([^*\s][^*]*?)\*/, style: 'ITALIC' },
+    { regex: /_([^_\s][^_]*?)_/, style: 'ITALIC' },
+  ];
+
+  function walk(segment: string, outputBase: number): string {
+    let earliest: { start: number; match: RegExpExecArray; style: SignalTextStyle['style'] } | null = null;
+    for (const { regex, style } of patterns) {
+      const m = regex.exec(segment);
+      if (!m) continue;
+      if (earliest === null || m.index < earliest.start) {
+        earliest = { start: m.index, match: m, style };
+      }
+    }
+    if (!earliest) return segment;
+
+    const before = segment.slice(0, earliest.start);
+    const fullMatch = earliest.match[0];
+    const inner = earliest.match[1];
+    const afterStart = earliest.start + fullMatch.length;
+    const after = segment.slice(afterStart);
+
+    const innerOut = walk(inner, outputBase + before.length);
+    styles.push({
+      style: earliest.style,
+      start: outputBase + before.length,
+      length: innerOut.length,
+    });
+    const afterOut = walk(after, outputBase + before.length + innerOut.length);
+
+    return before + innerOut + afterOut;
+  }
+
+  const text = walk(input, 0);
+  return { text, textStyles: styles };
 }
 
 function resolveMentions(text: string, mentions?: SignalMention[]): string {
@@ -196,8 +282,9 @@ function createSignalAdapter(): ChannelAdapter | null {
 
       let platformId: string;
       let isGroup: boolean;
-      if (sent.groupInfo?.groupId) {
-        platformId = `group.${sent.groupInfo.groupId}`;
+      const sentGroupId = sent.groupV2?.id || sent.groupInfo?.groupId;
+      if (sentGroupId) {
+        platformId = `group.${sentGroupId}`;
         isGroup = true;
       } else {
         const dest = sent.destinationNumber || sent.destination || '';
@@ -222,31 +309,25 @@ function createSignalAdapter(): ChannelAdapter | null {
     const senderPhone = envelope.sourceNumber || envelope.source || '';
     const senderName = envelope.sourceName || senderPhone;
 
-    let content: string;
-    if (dataMsg.message) {
-      content = resolveMentions(dataMsg.message, dataMsg.mentions);
-    } else if (audioAttachment) {
-      const filePath = audioAttachment.localPath || path.join(SIGNAL_CLI_ATTACHMENTS_DIR, audioAttachment.id!);
-      try {
-        const transcript = await transcribeAudio(filePath);
-        content = `[Voice: ${transcript}]`;
-        log.info('Voice note transcribed', { sender: senderId });
-      } catch (err) {
-        log.warn('Failed to transcribe voice note', { err });
-        content = '[Voice message - transcription failed]';
-      }
-    } else {
-      content = '';
-    }
-
-    // Append image references
-    const attachmentPaths: Array<{ path: string; contentType: string }> = [];
+    // Build the plain-text portion: caption text + image markers (images
+    // are passed as inline text markers so the agent can Read the file).
+    let textContent = dataMsg.message ? resolveMentions(dataMsg.message, dataMsg.mentions) : '';
     for (const img of imageAttachments) {
       const imageLine = `[Image: /workspace/attachments/${img.id}]`;
-      content = content ? `${content}\n${imageLine}` : imageLine;
-      attachmentPaths.push({
-        path: `/workspace/attachments/${img.id}`,
-        contentType: img.contentType || 'image/jpeg',
+      textContent = textContent ? `${textContent}\n${imageLine}` : imageLine;
+    }
+
+    // Audio is transcribed inside the container, sovereignty-by-default.
+    // We surface it as an attachment manifest entry — auto-transcribe.ts
+    // (container side) finds it via `parsed.attachments`, runs whisper-cli
+    // locally, and replaces the text with `[Voice (local-whisper): "..."]`
+    // before the formatter renders it for the agent.
+    const audioAttachments: Array<{ name: string; mimeType: string; localPath: string }> = [];
+    if (audioAttachment) {
+      audioAttachments.push({
+        name: audioAttachment.id!,
+        mimeType: audioAttachment.contentType || 'audio/aac',
+        localPath: `/workspace/attachments/${audioAttachment.id}`,
       });
     }
 
@@ -254,8 +335,9 @@ function createSignalAdapter(): ChannelAdapter | null {
     let isGroup: boolean;
     let groupName: string | undefined;
 
-    if (dataMsg.groupInfo?.groupId) {
-      platformId = `group.${dataMsg.groupInfo.groupId}`;
+    const groupId = dataMsg.groupV2?.id || dataMsg.groupInfo?.groupId;
+    if (groupId) {
+      platformId = `group.${groupId}`;
       isGroup = true;
       groupName = dataMsg.groupContext?.title;
       lastGroupDataMessage = Date.now();
@@ -272,14 +354,17 @@ function createSignalAdapter(): ChannelAdapter | null {
       id: `${envelope.timestamp || Date.now()}`,
       kind: 'chat',
       content: {
-        text: content,
+        text: textContent,
         sender: senderPhone,
         senderId: `signal:${senderId}`,
         senderName,
-        quotedMessageId: quote?.id ? String(quote.id) : undefined,
-        quotedText: quote?.text,
-        quotedAuthor: quote?.authorName || quote?.authorNumber || quote?.author,
-        attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
+        replyTo: quote
+          ? {
+              text: quote.text || '',
+              sender: quote.authorName || quote.authorNumber || quote.author || 'Unknown',
+            }
+          : undefined,
+        attachments: audioAttachments.length > 0 ? audioAttachments : undefined,
       },
       timestamp,
     };
@@ -476,22 +561,53 @@ function createSignalAdapter(): ChannelAdapter | null {
       }
 
       const isGroup = platformId.startsWith('group.');
-      const params: Record<string, unknown> = {
-        account: SIGNAL_PHONE_NUMBER,
-        message: text || '',
-      };
-      if (tmpFiles.length > 0) params.attachment = tmpFiles;
-      if (isGroup) {
-        params.groupId = platformId.slice('group.'.length);
-      } else {
-        params.recipient = [platformId];
-      }
+      const groupId = isGroup ? platformId.slice('group.'.length) : undefined;
+
+      // Signal rejects single messages above ~4 KB. Chunk on newline
+      // boundaries so multi-paragraph replies arrive intact. Attachments
+      // ride with the first chunk only; subsequent chunks are text-only.
+      const MAX_CHUNK = 4000;
+      const textChunks = text && text.length > MAX_CHUNK ? chunkText(text, MAX_CHUNK) : text ? [text] : [''];
+
+      let lastTimestamp: number | undefined;
       try {
-        const result = (await sendRpc('send', params)) as { timestamp?: number } | undefined;
+        for (let i = 0; i < textChunks.length; i++) {
+          const chunk = textChunks[i]!;
+          const { text: plainText, textStyles } = parseSignalStyles(chunk);
+          const params: Record<string, unknown> = {
+            account: SIGNAL_PHONE_NUMBER,
+            message: plainText,
+          };
+          if (textStyles.length > 0) {
+            params.textStyle = textStyles.map((s) => `${s.start}:${s.length}:${s.style}`);
+          }
+          if (i === 0 && tmpFiles.length > 0) params.attachment = tmpFiles;
+          if (isGroup) params.groupId = groupId;
+          else params.recipient = [platformId];
+
+          let result: { timestamp?: number } | undefined;
+          try {
+            result = (await sendRpc('send', params)) as { timestamp?: number } | undefined;
+          } catch (styledErr) {
+            // Fall back to raw markup if signal-cli rejects textStyle (older
+            // daemon versions or group-policy quirks). Preserves delivery
+            // at the cost of visible `**`/`` ` `` etc.
+            if (textStyles.length > 0) {
+              log.debug('Signal textStyle rejected, retrying with raw markup', { platformId });
+              delete params.textStyle;
+              params.message = chunk;
+              result = (await sendRpc('send', params)) as { timestamp?: number } | undefined;
+            } else {
+              throw styledErr;
+            }
+          }
+          if (result?.timestamp) lastTimestamp = result.timestamp;
+        }
         log.info('Signal message sent', {
           platformId,
           textLen: text?.length ?? 0,
-          timestamp: (result as any)?.timestamp,
+          chunks: textChunks.length,
+          timestamp: lastTimestamp,
         });
 
         // Clean up temp files after signal-cli confirms send
@@ -499,8 +615,7 @@ function createSignalAdapter(): ChannelAdapter | null {
           for (const f of tmpFiles) fs.unlink(f, () => {});
         }
 
-        const ts = (result as any)?.timestamp;
-        return ts ? String(ts) : undefined;
+        return lastTimestamp ? String(lastTimestamp) : undefined;
       } catch (err) {
         log.error('Signal send failed', { platformId, err });
         // Clean up temp files on failure too

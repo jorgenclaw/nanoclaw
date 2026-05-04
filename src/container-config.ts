@@ -47,6 +47,10 @@ export interface ContainerConfig {
   agentGroupId?: string;
   /** Max messages per prompt. Falls back to code default if unset. */
   maxMessagesPerPrompt?: number;
+  /** Per-group container env overrides — applied last so they win over global defaults. */
+  env?: Record<string, string>;
+  /** Hostnames to make unreachable inside the container (resolved to 0.0.0.0 via --add-host). */
+  blockedHosts?: string[];
 }
 
 function emptyConfig(): ContainerConfig {
@@ -87,6 +91,8 @@ export function readContainerConfig(folder: string): ContainerConfig {
       assistantName: raw.assistantName,
       agentGroupId: raw.agentGroupId,
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
+      env: raw.env,
+      blockedHosts: raw.blockedHosts,
     };
   } catch (err) {
     console.error(`[container-config] failed to parse ${p}: ${String(err)}`);

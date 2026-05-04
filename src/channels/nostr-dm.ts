@@ -6,7 +6,8 @@ import { connect } from 'net';
 import WebSocket from 'ws';
 import { useWebSocketImplementation, SimplePool } from 'nostr-tools/pool';
 
-import { GROUPS_DIR, NOSTR_DM_ALLOWLIST, NOSTR_DM_RELAYS, NOSTR_SIGNER_SOCKET } from '../config.js';
+import { GROUPS_DIR, NOSTR_DM_ALLOWLIST, NOSTR_DM_RELAYS, NOSTR_SIGNER_SOCKET, PROJECT_ROOT } from '../config.js';
+import { getMessagingGroupByPlatform } from '../db/messaging-groups.js';
 import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
@@ -70,7 +71,10 @@ function createNostrDMAdapter(): ChannelAdapter | null {
   let outgoingQueue: Array<{ platformId: string; text: string }> = [];
   const MAX_OUTGOING_QUEUE = 100;
   let seenIds = new Set<string>();
-  let lastEventTimestamp = Math.floor(Date.now() / 1000) - 300;
+  // NIP-17 gift wrap timestamps are fuzzed ±48h for privacy.
+  // A DM sent right now may have created_at hours in the past.
+  // Use a 72h lookback + seenIds dedup to catch all recent DMs.
+  let lastEventTimestamp = Math.floor(Date.now() / 1000) - 72 * 3600;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
   let subCloser: { close: () => void } | null = null;
@@ -197,8 +201,8 @@ function createNostrDMAdapter(): ChannelAdapter | null {
       return null;
     }
 
-    // Find group folder from conversations
-    const conv = config.conversations.find((c) => c.platformId === platformId);
+    // Gate: only process attachments for registered conversations.
+    const conv = getMessagingGroupByPlatform('nostr-dm', platformId);
     if (!conv) {
       log.warn('No registered conversation for Nostr DM attachment', { platformId });
       return null;
@@ -372,7 +376,14 @@ function createNostrDMAdapter(): ChannelAdapter | null {
 const registration: ChannelRegistration = {
   factory: createNostrDMAdapter,
   containerConfig: {
-    mounts: [{ hostPath: NOSTR_SIGNER_SOCKET, containerPath: '/run/nostr/signer.sock', readonly: false }],
+    mounts: [
+      { hostPath: NOSTR_SIGNER_SOCKET, containerPath: '/run/nostr/signer.sock', readonly: false },
+      {
+        hostPath: path.join(PROJECT_ROOT, 'tools/nostr-signer/clawstr-post.js'),
+        containerPath: '/usr/local/bin/clawstr-post',
+        readonly: true,
+      },
+    ],
   },
 };
 

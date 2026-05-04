@@ -99,13 +99,17 @@ registerDeliveryAction('register_contact', async (content) => {
     .prepare('SELECT id FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?')
     .get(mg.id, ag.id);
   if (!existingWiring) {
-    const triggerRules = requiresTrigger ? JSON.stringify({ pattern: '@Jorgenclaw', requiresTrigger: true }) : null;
+    // Post-engage-modes schema: replace old trigger_rules JSON with the
+    // four explicit columns. requiresTrigger=true → engage on @Jorgenclaw
+    // pattern; requiresTrigger=false → engage on everything ('.').
     createMessagingGroupAgent({
       id: genId('mga'),
       messaging_group_id: mg.id,
       agent_group_id: ag.id,
-      trigger_rules: triggerRules,
-      response_scope: 'all',
+      engage_mode: 'pattern',
+      engage_pattern: requiresTrigger ? '@Jorgenclaw' : '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
       session_mode: 'shared',
       priority: 0,
       created_at: now,
