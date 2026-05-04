@@ -11,11 +11,22 @@
  * Auto-wipe on model change: OpenCode persists the model name into its session
  * DB. If the user switches models (edit container.json or set a new env), an
  * unmodified resume reads the old model from session and OpenCode errors with
- * "Model not found". We sidecar the last-used model in `.last-model` and wipe
+ * "Model not found". We sidecar a model fingerprint in `.last-model` and wipe
  * the session DB when it changes, forcing a fresh session against the new
  * model. Conversation context is preserved by NanoClaw's outer messages_in/out
  * — only OpenCode's internal session scratchpad is reset.
+ *
+ * The fingerprint is `<model-name>|<modelfile-sha256>` for Ollama models. We
+ * hash the output of `ollama show --modelfile <name>` so a Modelfile-only
+ * recreate (same name, different weights or params, e.g. swapping q4→q8 or
+ * adding `num_predict 8192`) still triggers the wipe. Without the digest,
+ * OpenCode would resume the old session against re-baked weights and Ollama
+ * silently hangs on the next inference call (300s event-stream timeouts —
+ * observed on EVO 2026-05-04 after a Modelfile param change). Non-Ollama
+ * providers fall back to name-only (the prior behavior).
  */
+import { execFileSync } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -62,6 +73,40 @@ function clearAgentRunnerSdkSessionId(sessionDir: string): void {
   }
 }
 
+/**
+ * Compute a fingerprint for the current model. Includes the Ollama Modelfile
+ * digest (when applicable) so a same-name Modelfile recreate invalidates the
+ * cache. Returns the bare model name unchanged for non-Ollama providers or
+ * when the Ollama lookup fails (degraded — equivalent to the prior behavior).
+ */
+function computeModelFingerprint(currentModel: string): string {
+  // Recognize Ollama in two forms:
+  //   "ollama/gemma4:31b-jorgenclaw" — provider/model syntax
+  //   "gemma4:31b-jorgenclaw"        — bare model when OPENCODE_PROVIDER=ollama
+  // We can't distinguish the second case from a remote model name without the
+  // provider env, so we only auto-detect the explicit "ollama/" prefix here.
+  // Bare names still work — they just won't get a digest, falling back to
+  // name-only comparison.
+  const ollamaPrefix = 'ollama/';
+  if (!currentModel.startsWith(ollamaPrefix)) return currentModel;
+  const ollamaName = currentModel.slice(ollamaPrefix.length);
+  try {
+    const modelfile = execFileSync('ollama', ['show', '--modelfile', ollamaName], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const digest = crypto.createHash('sha256').update(modelfile).digest('hex').slice(0, 16);
+    return `${currentModel}|${digest}`;
+  } catch (err) {
+    log.warn('OpenCode auto-wipe: Ollama digest probe failed — falling back to name-only', {
+      model: currentModel,
+      err: (err as Error).message,
+    });
+    return currentModel;
+  }
+}
+
 function maybeWipeOnModelChange(
   opencodeDir: string,
   sessionDir: string,
@@ -71,24 +116,25 @@ function maybeWipeOnModelChange(
   if (!currentModel) return;
   const lastModelPath = path.join(opencodeDir, '.last-model');
   const sessionDbDir = path.join(opencodeDir, 'opencode');
-  let lastModel: string | undefined;
+  const currentFingerprint = computeModelFingerprint(currentModel);
+  let lastFingerprint: string | undefined;
   try {
-    lastModel = fs.readFileSync(lastModelPath, 'utf8').trim();
+    lastFingerprint = fs.readFileSync(lastModelPath, 'utf8').trim();
   } catch {
     // first run for this session — no previous model recorded
   }
-  if (lastModel && lastModel !== currentModel) {
+  if (lastFingerprint && lastFingerprint !== currentFingerprint) {
     log.info('OpenCode model changed — wiping session state', {
       sessionId,
-      from: lastModel,
-      to: currentModel,
+      from: lastFingerprint,
+      to: currentFingerprint,
     });
     if (fs.existsSync(sessionDbDir)) {
       fs.rmSync(sessionDbDir, { recursive: true, force: true });
     }
     clearAgentRunnerSdkSessionId(sessionDir);
   }
-  fs.writeFileSync(lastModelPath, currentModel);
+  fs.writeFileSync(lastModelPath, currentFingerprint);
 }
 
 registerProviderContainerConfig('opencode', (ctx) => {
