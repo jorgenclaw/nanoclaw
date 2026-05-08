@@ -21,17 +21,17 @@ mkdir -p "$(dirname "$LOG")"
 
   mkdir -p "$BACKUP_DIR"
 
-  rsync -a --delete \
+  rsync -a --delete --no-links \
     --exclude='node_modules' \
     --exclude='*.sock' \
     "$PROJECT/store/" "$BACKUP_DIR/store/"
 
-  rsync -a --delete \
+  rsync -a --delete --no-links \
     --exclude='node_modules' \
     --exclude='*.sock' \
     "$PROJECT/groups/" "$BACKUP_DIR/groups/"
 
-  rsync -a --delete \
+  rsync -a --delete --no-links \
     --exclude='node_modules' \
     --exclude='*.sock' \
     "$PROJECT/data/" "$BACKUP_DIR/data/"

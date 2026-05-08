@@ -16,6 +16,7 @@ import './weather.js';
 import './web-fetch.js';
 import './web-search.js';
 import './report-failure.js';
+import './x-integration.js';
 import { startMcpServer } from './server.js';
 
 function log(msg: string): void {

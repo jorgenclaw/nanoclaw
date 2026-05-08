@@ -211,11 +211,25 @@ function createWatchAdapter(): ChannelAdapter | null {
 
     log.info('watch: inbound message', { deviceId, textLen: text.length, preview: text.slice(0, 100) });
 
-    // Find Phone: handle directly — mirror the ring message to Signal, skip the agent
+    // Find Phone: burst a sequence of short messages so the phone vibrates
+    // distinctly even on silent. Single-message rapid bursts get debounced
+    // into one buzz on most phones (Signal/Android-side notification batching
+    // and OS vibration de-dup). 2500 ms gap is past the typical debounce
+    // window. Fire-and-forget so the watch sees an immediate "Sent" instead
+    // of waiting for the full burst to finish.
     if (text.includes('Find Phone') && text.startsWith('SYSTEM:')) {
-      mirrorToSignal('FIND MY PHONE - ring ring! 📱🔔');
-      log.info('watch: find phone — mirrored to signal');
-      sendJson(res, 200, { reply: 'Sent to Signal' });
+      const FIND_PHONE_BURST_COUNT = 5;
+      const FIND_PHONE_BURST_GAP_MS = 2500;
+      (async () => {
+        for (let i = 1; i <= FIND_PHONE_BURST_COUNT; i++) {
+          mirrorToSignal(`📱🔔 FIND MY PHONE (${i}/${FIND_PHONE_BURST_COUNT})`);
+          if (i < FIND_PHONE_BURST_COUNT) {
+            await new Promise((r) => setTimeout(r, FIND_PHONE_BURST_GAP_MS));
+          }
+        }
+      })().catch((err) => log.warn('watch: find phone burst failed', { err }));
+      log.info('watch: find phone — burst started', { count: FIND_PHONE_BURST_COUNT, gapMs: FIND_PHONE_BURST_GAP_MS });
+      sendJson(res, 200, { reply: `Buzzing phone ×${FIND_PHONE_BURST_COUNT}` });
       return;
     }
 

@@ -36,17 +36,17 @@ A handy reference of commands you'll actually want when running NanoClaw and the
 
 | What you want to do | Command |
 |---|---|
-| Build firmware (no flash) | `cd ~/projects/nanoclaw-watch && ~/.local/bin/pio run` |
-| Build & flash firmware | `cd ~/projects/nanoclaw-watch && ~/.local/bin/pio run --target upload` |
+| Build firmware (no flash) | `cd ~/nanoclaw-watch && ~/.local/bin/pio run` |
+| Build & flash firmware | `cd ~/nanoclaw-watch && ~/.local/bin/pio run --target upload` |
 | Watch serial output (Python — works headless) | `python3 -c "import serial,time;s=serial.Serial('/dev/ttyACM0',115200,timeout=0.5);end=time.time()+60` followed by a `while time.time()<end: line=s.readline().decode(errors='replace').rstrip();` <br>(*Easier: ask Claude to capture serial for N seconds*) |
 | Confirm watch is plugged in | `ls /dev/ttyACM*` |
-| Force a clean rebuild (clears cached `.o` files) | `cd ~/projects/nanoclaw-watch && ~/.local/bin/pio run --target clean && ~/.local/bin/pio run` |
+| Force a clean rebuild (clears cached `.o` files) | `cd ~/nanoclaw-watch && ~/.local/bin/pio run --target clean && ~/.local/bin/pio run` |
 | **Enable Signal mirror** of watch conversations | `echo 'WATCH_SIGNAL_MIRROR_JID=signal:198c1cdb-8856-4ac7-9b84-a504a0017c79' >> ~/NanoClaw/.env && systemctl --user restart nanoclaw` |
 | **Disable Signal mirror** | `sed -i '/WATCH_SIGNAL_MIRROR_JID/d' ~/NanoClaw/.env && systemctl --user restart nanoclaw` |
 | Confirm mirror is currently on | `grep WATCH_SIGNAL_MIRROR_JID ~/NanoClaw/.env` |
 | Recover stuck watch (force bootloader) | Hold the side button while plugging in USB, then reflash |
 | Hard power-cycle a wedged watch | Hold side button **8+ seconds** to force AXP2101 power off, wait 3 sec, short press to boot |
-| **Flash workaround** if `pio run --target upload` fails with `OSError: [Errno 71] Protocol error` (EPROTO) | Use the EPROTO-tolerant wrapper at `/tmp/flash-watch.py`. **CRITICAL: must flash all 4 files at correct offsets, NOT just firmware.bin to 0x0 — that overwrites the bootloader and bricks the watch.** Correct invocation:<br>`~/.platformio/penv/bin/python /tmp/flash-watch.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 ~/projects/nanoclaw-watch/.pio/build/twatch-s3/bootloader.bin 0x8000 ~/projects/nanoclaw-watch/.pio/build/twatch-s3/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 ~/projects/nanoclaw-watch/.pio/build/twatch-s3/firmware.bin` |
+| **Flash workaround** if `pio run --target upload` fails with `OSError: [Errno 71] Protocol error` (EPROTO) | Use the EPROTO-tolerant wrapper at `/tmp/flash-watch.py`. **CRITICAL: must flash all 4 files at correct offsets, NOT just firmware.bin to 0x0 — that overwrites the bootloader and bricks the watch.** Correct invocation:<br>`~/.platformio/penv/bin/python /tmp/flash-watch.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 write-flash 0x0 ~/nanoclaw-watch/.pio/build/twatch-s3/bootloader.bin 0x8000 ~/nanoclaw-watch/.pio/build/twatch-s3/partitions.bin 0xe000 ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 ~/nanoclaw-watch/.pio/build/twatch-s3/firmware.bin` |
 | Recover a watch where the bootloader was overwritten | Same all-4-files command above. The ESP32-S3 BOOTROM is in silicon and always responds to esptool even when the flash is corrupt. Plug USB, run the command, you're back. |
 
 ---
@@ -129,7 +129,7 @@ NanoClaw stores everything in `~/NanoClaw/store/messages.db`. The `sqlite3` CLI 
 | Watch posts succeed but no reply visible | Check `WATCH_SYNC_TIMEOUT_MS` in `.env` (should be ≥ 30000), then `grep 'sync reply timeout' ~/NanoClaw/logs/nanoclaw.log` |
 | Signal messages stop arriving | `systemctl --user restart signal-cli && systemctl --user restart nanoclaw` |
 | White Noise group "not found" after reboot | The MLS keyring is wiped on reboot — see `docs/whitenoise-setup.md` reboot recovery section |
-| Watch button doesn't respond at all | Reflash: `cd ~/projects/nanoclaw-watch && pio run --target upload`. If still dead, hold side button while plugging USB |
+| Watch button doesn't respond at all | Reflash: `cd ~/nanoclaw-watch && pio run --target upload`. If still dead, hold side button while plugging USB |
 | Want to see exactly what Quad knows | `cat ~/.claude/projects/-home-jorgenclaw-NanoClaw/memory/MEMORY.md` |
 
 ---

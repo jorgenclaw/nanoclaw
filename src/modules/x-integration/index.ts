@@ -117,7 +117,10 @@ function runScript(scriptName: string, args: Record<string, unknown>): Promise<S
         return;
       }
       try {
-        const lines = stdout.trim().split('\n').filter((l) => l.length > 0);
+        const lines = stdout
+          .trim()
+          .split('\n')
+          .filter((l) => l.length > 0);
         const last = lines[lines.length - 1] || '{}';
         resolve(JSON.parse(last) as ScriptResult);
       } catch (parseErr) {
@@ -188,134 +191,244 @@ function makeXHandler(spec: XHandlerSpec): DeliveryActionHandler {
 // ── Registrations (no x_delete_tweet — defense in depth) ────
 
 // Read
-registerDeliveryAction('x_read_tweet', makeXHandler({
-  action: 'x_read_tweet', scriptName: 'read-tweet',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
-}));
-registerDeliveryAction('x_read_thread', makeXHandler({
-  action: 'x_read_thread', scriptName: 'read-thread',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl, limit: c.limit ?? 20 }),
-}));
-registerDeliveryAction('x_read_user', makeXHandler({
-  action: 'x_read_user', scriptName: 'read-user',
-  required: ['handle'],
-  buildArgs: (c) => ({ handle: c.handle, limit: c.limit ?? 20 }),
-}));
-registerDeliveryAction('x_read_bookmarks', makeXHandler({
-  action: 'x_read_bookmarks', scriptName: 'read-bookmarks',
-  buildArgs: (c) => ({ limit: c.limit ?? 20, cursor: c.cursor ?? null }),
-}));
-registerDeliveryAction('x_read_list', makeXHandler({
-  action: 'x_read_list', scriptName: 'read-list',
-  required: ['listUrl'],
-  buildArgs: (c) => ({ listUrl: c.listUrl, limit: c.limit ?? 20 }),
-}));
-registerDeliveryAction('x_read_timeline', makeXHandler({
-  action: 'x_read_timeline', scriptName: 'read-timeline',
-  buildArgs: (c) => ({ limit: c.limit ?? 20 }),
-}));
-registerDeliveryAction('x_read_notifications', makeXHandler({
-  action: 'x_read_notifications', scriptName: 'read-notifications',
-  buildArgs: (c) => ({ limit: c.limit ?? 20 }),
-}));
-registerDeliveryAction('x_search', makeXHandler({
-  action: 'x_search', scriptName: 'search',
-  required: ['query'],
-  buildArgs: (c) => ({ query: c.query, latest: c.latest ?? false, limit: c.limit ?? 20 }),
-}));
+registerDeliveryAction(
+  'x_read_tweet',
+  makeXHandler({
+    action: 'x_read_tweet',
+    scriptName: 'read-tweet',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
+  }),
+);
+registerDeliveryAction(
+  'x_read_thread',
+  makeXHandler({
+    action: 'x_read_thread',
+    scriptName: 'read-thread',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl, limit: c.limit ?? 20 }),
+  }),
+);
+registerDeliveryAction(
+  'x_read_user',
+  makeXHandler({
+    action: 'x_read_user',
+    scriptName: 'read-user',
+    required: ['handle'],
+    buildArgs: (c) => ({ handle: c.handle, limit: c.limit ?? 20 }),
+  }),
+);
+registerDeliveryAction(
+  'x_read_bookmarks',
+  makeXHandler({
+    action: 'x_read_bookmarks',
+    scriptName: 'read-bookmarks',
+    buildArgs: (c) => ({ limit: c.limit ?? 20, cursor: c.cursor ?? null }),
+  }),
+);
+registerDeliveryAction(
+  'x_read_list',
+  makeXHandler({
+    action: 'x_read_list',
+    scriptName: 'read-list',
+    required: ['listUrl'],
+    buildArgs: (c) => ({ listUrl: c.listUrl, limit: c.limit ?? 20 }),
+  }),
+);
+registerDeliveryAction(
+  'x_read_timeline',
+  makeXHandler({
+    action: 'x_read_timeline',
+    scriptName: 'read-timeline',
+    buildArgs: (c) => ({ limit: c.limit ?? 20 }),
+  }),
+);
+registerDeliveryAction(
+  'x_read_notifications',
+  makeXHandler({
+    action: 'x_read_notifications',
+    scriptName: 'read-notifications',
+    buildArgs: (c) => ({ limit: c.limit ?? 20 }),
+  }),
+);
+registerDeliveryAction(
+  'x_search',
+  makeXHandler({
+    action: 'x_search',
+    scriptName: 'search',
+    required: ['query'],
+    buildArgs: (c) => ({ query: c.query, latest: c.latest ?? false, limit: c.limit ?? 20 }),
+  }),
+);
 
 // Compose
-registerDeliveryAction('x_post', makeXHandler({
-  action: 'x_post', scriptName: 'post',
-  required: ['content'],
-  buildArgs: (c) => ({ content: c.content, media: c.media ?? [], scheduleAt: c.scheduleAt ?? null }),
-}));
-registerDeliveryAction('x_reply', makeXHandler({
-  action: 'x_reply', scriptName: 'reply',
-  required: ['tweetUrl', 'content'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl, content: c.content, media: c.media ?? [], scheduleAt: c.scheduleAt ?? null }),
-}));
-registerDeliveryAction('x_quote', makeXHandler({
-  action: 'x_quote', scriptName: 'quote',
-  required: ['tweetUrl', 'comment'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl, comment: c.comment, media: c.media ?? [], scheduleAt: c.scheduleAt ?? null }),
-}));
+registerDeliveryAction(
+  'x_post',
+  makeXHandler({
+    action: 'x_post',
+    scriptName: 'post',
+    required: ['content'],
+    buildArgs: (c) => ({ content: c.content, media: c.media ?? [], scheduleAt: c.scheduleAt ?? null }),
+  }),
+);
+registerDeliveryAction(
+  'x_reply',
+  makeXHandler({
+    action: 'x_reply',
+    scriptName: 'reply',
+    required: ['tweetUrl', 'content'],
+    buildArgs: (c) => ({
+      tweetUrl: c.tweetUrl,
+      content: c.content,
+      media: c.media ?? [],
+      scheduleAt: c.scheduleAt ?? null,
+    }),
+  }),
+);
+registerDeliveryAction(
+  'x_quote',
+  makeXHandler({
+    action: 'x_quote',
+    scriptName: 'quote',
+    required: ['tweetUrl', 'comment'],
+    buildArgs: (c) => ({
+      tweetUrl: c.tweetUrl,
+      comment: c.comment,
+      media: c.media ?? [],
+      scheduleAt: c.scheduleAt ?? null,
+    }),
+  }),
+);
 
 // Engagement toggles
-registerDeliveryAction('x_like', makeXHandler({
-  action: 'x_like', scriptName: 'like',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
-}));
-registerDeliveryAction('x_unlike', makeXHandler({
-  action: 'x_unlike', scriptName: 'unlike',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
-}));
-registerDeliveryAction('x_retweet', makeXHandler({
-  action: 'x_retweet', scriptName: 'retweet',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
-}));
-registerDeliveryAction('x_unretweet', makeXHandler({
-  action: 'x_unretweet', scriptName: 'unretweet',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
-}));
-registerDeliveryAction('x_bookmark', makeXHandler({
-  action: 'x_bookmark', scriptName: 'bookmark',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
-}));
-registerDeliveryAction('x_unbookmark', makeXHandler({
-  action: 'x_unbookmark', scriptName: 'unbookmark',
-  required: ['tweetUrl'],
-  buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
-}));
-registerDeliveryAction('x_follow', makeXHandler({
-  action: 'x_follow', scriptName: 'follow',
-  required: ['handle'],
-  buildArgs: (c) => ({ handle: c.handle }),
-}));
-registerDeliveryAction('x_unfollow', makeXHandler({
-  action: 'x_unfollow', scriptName: 'unfollow',
-  required: ['handle'],
-  buildArgs: (c) => ({ handle: c.handle }),
-}));
+registerDeliveryAction(
+  'x_like',
+  makeXHandler({
+    action: 'x_like',
+    scriptName: 'like',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
+  }),
+);
+registerDeliveryAction(
+  'x_unlike',
+  makeXHandler({
+    action: 'x_unlike',
+    scriptName: 'unlike',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
+  }),
+);
+registerDeliveryAction(
+  'x_retweet',
+  makeXHandler({
+    action: 'x_retweet',
+    scriptName: 'retweet',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
+  }),
+);
+registerDeliveryAction(
+  'x_unretweet',
+  makeXHandler({
+    action: 'x_unretweet',
+    scriptName: 'unretweet',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
+  }),
+);
+registerDeliveryAction(
+  'x_bookmark',
+  makeXHandler({
+    action: 'x_bookmark',
+    scriptName: 'bookmark',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
+  }),
+);
+registerDeliveryAction(
+  'x_unbookmark',
+  makeXHandler({
+    action: 'x_unbookmark',
+    scriptName: 'unbookmark',
+    required: ['tweetUrl'],
+    buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
+  }),
+);
+registerDeliveryAction(
+  'x_follow',
+  makeXHandler({
+    action: 'x_follow',
+    scriptName: 'follow',
+    required: ['handle'],
+    buildArgs: (c) => ({ handle: c.handle }),
+  }),
+);
+registerDeliveryAction(
+  'x_unfollow',
+  makeXHandler({
+    action: 'x_unfollow',
+    scriptName: 'unfollow',
+    required: ['handle'],
+    buildArgs: (c) => ({ handle: c.handle }),
+  }),
+);
 
 // Scheduling
-registerDeliveryAction('x_list_scheduled', makeXHandler({
-  action: 'x_list_scheduled', scriptName: 'list-scheduled',
-  buildArgs: () => ({}),
-}));
-registerDeliveryAction('x_cancel_scheduled', makeXHandler({
-  action: 'x_cancel_scheduled', scriptName: 'cancel-scheduled',
-  buildArgs: (c) => ({ index: c.index ?? null, textMatch: c.textMatch ?? null }),
-}));
+registerDeliveryAction(
+  'x_list_scheduled',
+  makeXHandler({
+    action: 'x_list_scheduled',
+    scriptName: 'list-scheduled',
+    buildArgs: () => ({}),
+  }),
+);
+registerDeliveryAction(
+  'x_cancel_scheduled',
+  makeXHandler({
+    action: 'x_cancel_scheduled',
+    scriptName: 'cancel-scheduled',
+    buildArgs: (c) => ({ index: c.index ?? null, textMatch: c.textMatch ?? null }),
+  }),
+);
 
 // Bulk export (separate handler so we can document the long-running nature)
-registerDeliveryAction('x_export_bookmarks', makeXHandler({
-  action: 'x_export_bookmarks', scriptName: 'export-bookmarks',
-  buildArgs: (c) => ({ reset: c.reset === true }),
-}));
+registerDeliveryAction(
+  'x_export_bookmarks',
+  makeXHandler({
+    action: 'x_export_bookmarks',
+    scriptName: 'export-bookmarks',
+    buildArgs: (c) => ({ reset: c.reset === true }),
+  }),
+);
 
 // DMs (redacted logging — bodies stay out of nanoclaw.log)
-registerDeliveryAction('x_read_dm_inbox', makeXHandler({
-  action: 'x_read_dm_inbox', scriptName: 'read-dm-inbox',
-  buildArgs: (c) => ({ limit: c.limit ?? 20 }),
-  redactLogs: true,
-}));
-registerDeliveryAction('x_read_dm_thread', makeXHandler({
-  action: 'x_read_dm_thread', scriptName: 'read-dm-thread',
-  required: ['handle'],
-  buildArgs: (c) => ({ handle: c.handle, limit: c.limit ?? 30 }),
-  redactLogs: true,
-}));
-registerDeliveryAction('x_send_dm', makeXHandler({
-  action: 'x_send_dm', scriptName: 'send-dm',
-  required: ['handle', 'content'],
-  buildArgs: (c) => ({ handle: c.handle, content: c.content }),
-  redactLogs: true,
-}));
+registerDeliveryAction(
+  'x_read_dm_inbox',
+  makeXHandler({
+    action: 'x_read_dm_inbox',
+    scriptName: 'read-dm-inbox',
+    buildArgs: (c) => ({ limit: c.limit ?? 20 }),
+    redactLogs: true,
+  }),
+);
+registerDeliveryAction(
+  'x_read_dm_thread',
+  makeXHandler({
+    action: 'x_read_dm_thread',
+    scriptName: 'read-dm-thread',
+    required: ['handle'],
+    buildArgs: (c) => ({ handle: c.handle, limit: c.limit ?? 30 }),
+    redactLogs: true,
+  }),
+);
+registerDeliveryAction(
+  'x_send_dm',
+  makeXHandler({
+    action: 'x_send_dm',
+    scriptName: 'send-dm',
+    required: ['handle', 'content'],
+    buildArgs: (c) => ({ handle: c.handle, content: c.content }),
+    redactLogs: true,
+  }),
+);
