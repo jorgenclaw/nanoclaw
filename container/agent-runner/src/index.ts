@@ -81,7 +81,22 @@ async function main(): Promise<void> {
     },
   };
 
+  // Merge MCP servers declared in container.json. Env values support
+  // ${VAR} placeholder interpolation — resolved from the container's own
+  // process.env (which the host populates at spawn time). This keeps
+  // secrets (Proton Bridge password, etc.) out of the config file while
+  // still letting the config declare which env vars each MCP server needs.
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+    if (serverConfig.env) {
+      for (const [k, v] of Object.entries(serverConfig.env)) {
+        if (typeof v === 'string') {
+          serverConfig.env[k] = v.replace(
+            /\$\{([A-Z_][A-Z0-9_]*)\}/g,
+            (_, varName) => process.env[varName] || '',
+          );
+        }
+      }
+    }
     mcpServers[name] = serverConfig;
     log(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
@@ -95,7 +110,6 @@ async function main(): Promise<void> {
 
   await runPollLoop({
     provider,
-    providerName,
     cwd: CWD,
     systemContext: { instructions },
   });

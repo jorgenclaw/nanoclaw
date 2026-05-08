@@ -31,9 +31,9 @@ import fs from 'fs';
 
 import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getDb } from './db/connection.js';
 import {
   countDueMessages,
-  deleteOrphanProcessingClaims,
   getContainerState,
   getMessageForRetry,
   getProcessingClaims,
@@ -43,20 +43,10 @@ import {
   type ContainerState,
 } from './db/session-db.js';
 import { log } from './log.js';
-import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
+import { openInboundDb, openOutboundDb, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
-
-/**
- * SQLite TIMESTAMP columns store UTC without a timezone marker. Date.parse
- * treats timezoneless ISO strings as local time, so on non-UTC hosts every
- * timestamp looks (TZ offset) hours stale — leading to spurious kill-claim
- * decisions on freshly-claimed messages. Append "Z" when no zone marker is
- * present so Date.parse interprets the string as UTC.
- */
-export function parseSqliteUtc(s: string): number {
-  return Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z');
-}
+import { nextEvenSeq } from './db/session-db.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
@@ -106,7 +96,7 @@ export function decideStuckAction(args: {
 
   const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
   for (const claim of claims) {
-    const claimedAt = parseSqliteUtc(claim.status_changed);
+    const claimedAt = Date.parse(claim.status_changed);
     if (Number.isNaN(claimedAt)) continue;
     const claimAge = now - claimedAt;
     if (claimAge <= tolerance) continue;
@@ -118,6 +108,7 @@ export function decideStuckAction(args: {
 }
 
 let running = false;
+let preciseTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function startHostSweep(): void {
   if (running) return;
@@ -127,36 +118,74 @@ export function startHostSweep(): void {
 
 export function stopHostSweep(): void {
   running = false;
+  if (preciseTimer) {
+    clearTimeout(preciseTimer);
+    preciseTimer = null;
+  }
 }
 
 async function sweep(): Promise<void> {
   if (!running) return;
 
+  let earliestDue: number | null = null;
+
   try {
+    // 1. Check central scheduled tasks and push due ones to their sessions
+    try {
+      const centralDue = await sweepCentralTasks();
+      if (centralDue !== null && (earliestDue === null || centralDue < earliestDue)) {
+        earliestDue = centralDue;
+      }
+    } catch (err) {
+      log.error('Central task sweep error', { err });
+    }
+
+    // 2. Sweep per-session DBs
     const sessions = getActiveSessions();
     for (const session of sessions) {
-      await sweepSession(session);
+      const nextDue = await sweepSession(session);
+      if (nextDue !== null) {
+        if (earliestDue === null || nextDue < earliestDue) {
+          earliestDue = nextDue;
+        }
+      }
     }
   } catch (err) {
     log.error('Host sweep error', { err });
   }
 
+  // Schedule a precise wake for the next due task (if sooner than the regular sweep)
+  if (preciseTimer) {
+    clearTimeout(preciseTimer);
+    preciseTimer = null;
+  }
+  if (earliestDue !== null) {
+    const delayMs = Math.max(1000, earliestDue - Date.now());
+    if (delayMs < SWEEP_INTERVAL_MS) {
+      preciseTimer = setTimeout(() => {
+        preciseTimer = null;
+        if (running) sweep();
+      }, delayMs);
+      log.info('Precise task timer set', { firesInMs: delayMs });
+    }
+  }
+
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 
-async function sweepSession(session: Session): Promise<void> {
+async function sweepSession(session: Session): Promise<number | null> {
   const agentGroup = getAgentGroup(session.agent_group_id);
-  if (!agentGroup) return;
+  if (!agentGroup) return null;
 
   const inPath = inboundDbPath(agentGroup.id, session.id);
-  if (!fs.existsSync(inPath)) return;
+  if (!fs.existsSync(inPath)) return null;
 
   let inDb: Database.Database;
   let outDb: Database.Database | null = null;
   try {
     inDb = openInboundDb(agentGroup.id, session.id);
   } catch {
-    return;
+    return null;
   }
 
   try {
@@ -180,8 +209,6 @@ async function sweepSession(session: Session): Promise<void> {
     const dueCount = countDueMessages(inDb);
     if (dueCount > 0 && !isContainerRunning(session.id)) {
       log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
-      // wakeContainer never throws — transient spawn failures (OneCLI down,
-      // etc.) return false and leave messages pending for the next tick.
       await wakeContainer(session);
     }
 
@@ -205,10 +232,185 @@ async function sweepSession(session: Session): Promise<void> {
     const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
     await handleRecurrence(inDb, session);
     // MODULE-HOOK:scheduling-recurrence:end
+
+    // Per-session pruning + next-due timestamp used to live here; upstream
+    // removed those helpers during the V2 refactor. Central task sweep owns
+    // next-due computation now (sweepCentralTasks returns it).
+    return null;
   } finally {
     inDb.close();
     outDb?.close();
   }
+}
+
+async function sweepCentralTasks(): Promise<number | null> {
+  const centralDb = getDb();
+
+  // 1. Handle central task recurrence
+  const { handleCentralRecurrence } = await import('./modules/scheduling/central-recurrence.js');
+  await handleCentralRecurrence(centralDb);
+
+  // 2. Find due central tasks
+  const { getDuetasks, getNextDueTime, markCentralTaskCompleted } = await import('./modules/scheduling/central-db.js');
+  const dueTasks = getDuetasks(centralDb);
+
+  if (dueTasks.length === 0) {
+    const nextDueStr = getNextDueTime(centralDb);
+    return nextDueStr ? new Date(nextDueStr + 'Z').getTime() : null;
+  }
+
+  // 3. For each due task, find its session and insert into inbound.db
+  const sessions = getActiveSessions();
+  const sessionMap = new Map<string, Session>();
+  for (const session of sessions) {
+    sessionMap.set(session.id, session);
+  }
+
+  const { getMessagingGroupByPlatform, getMessagingGroupAgents } = await import('./db/messaging-groups.js');
+  const { getAgentGroupByFolder } = await import('./db/agent-groups.js');
+
+  for (const task of dueTasks) {
+    try {
+      // Resolve the session by the task's declared destination.
+      // Real channels (signal/watch/whitenoise/nostr-dm/...) → look up the
+      // messaging_group and find an active session bound to it whose
+      // agent_group is wired to that messaging_group.
+      // Pseudo-channels: 'agent' (platform_id = agent group folder) and
+      // 'system' (no chat output) are routed by agent group.
+      let targetSession: Session | undefined;
+
+      if (task.platform_id && task.channel_type && task.channel_type !== 'agent' && task.channel_type !== 'system') {
+        const mg = getMessagingGroupByPlatform(task.channel_type, task.platform_id);
+        if (!mg) {
+          log.warn('No messaging_group for scheduled task destination — skipping', {
+            taskId: task.id,
+            channel_type: task.channel_type,
+            platform_id: task.platform_id,
+          });
+          continue;
+        }
+        const wiredAgentIds = new Set(getMessagingGroupAgents(mg.id).map((w) => w.agent_group_id));
+        targetSession = sessions.find((s) => s.messaging_group_id === mg.id && wiredAgentIds.has(s.agent_group_id));
+        if (!targetSession) {
+          log.warn('No active session for scheduled task destination', {
+            taskId: task.id,
+            channel_type: task.channel_type,
+            platform_id: task.platform_id,
+            messagingGroupId: mg.id,
+            wiredAgentGroupIds: [...wiredAgentIds],
+          });
+          continue;
+        }
+      } else if (task.channel_type === 'agent' && task.platform_id) {
+        // platform_id is the target agent group's folder (e.g. 'main', 'frame').
+        const ag = getAgentGroupByFolder(task.platform_id);
+        if (!ag) {
+          log.warn('No agent group for scheduled task agent-destination', {
+            taskId: task.id,
+            folder: task.platform_id,
+          });
+          continue;
+        }
+        const candidates = sessions.filter((s) => s.agent_group_id === ag.id);
+        // Prefer a background session (no messaging_group); fall back to any active session.
+        targetSession = candidates.find((s) => !s.messaging_group_id) ?? candidates[0];
+      } else if (task.channel_type === 'system') {
+        // System tasks run in the main agent group's background session.
+        const main = getAgentGroupByFolder('main');
+        if (main) {
+          const candidates = sessions.filter((s) => s.agent_group_id === main.id);
+          targetSession = candidates.find((s) => !s.messaging_group_id) ?? candidates[0];
+        }
+      }
+
+      if (!targetSession) {
+        log.warn('No target session found for central task', {
+          taskId: task.id,
+          channel_type: task.channel_type,
+          platform_id: task.platform_id,
+        });
+        continue;
+      }
+
+      const agentGroup = getAgentGroup(targetSession.agent_group_id);
+      if (!agentGroup) continue;
+
+      const inPath = inboundDbPath(agentGroup.id, targetSession.id);
+      if (!fs.existsSync(inPath)) {
+        log.warn('Session inbound.db does not exist', { sessionId: targetSession.id });
+        continue;
+      }
+
+      let inDb: Database.Database;
+      try {
+        inDb = openInboundDb(agentGroup.id, targetSession.id);
+      } catch {
+        continue;
+      }
+
+      try {
+        // Already pushed to this session's inbound.db on a previous tick?
+        // Can happen if the container completed the row but we never marked
+        // the central row done (e.g., after a host restart). Short-circuit
+        // the re-push: mark central completed so recurrence can generate the
+        // next occurrence and we don't spin on a dead push forever.
+        const existing = inDb.prepare('SELECT status FROM messages_in WHERE id = ?').get(task.id) as
+          | { status: string }
+          | undefined;
+        if (existing) {
+          log.info('Central task already present in inbound.db, marking central completed', {
+            taskId: task.id,
+            inboundStatus: existing.status,
+          });
+          markCentralTaskCompleted(centralDb, task.id);
+          continue;
+        }
+
+        // Insert without the cron recurrence — central owns recurrence now,
+        // so we don't want the per-session handleRecurrence to also generate
+        // a follow-up row for the same series (would double-fire).
+        inDb
+          .prepare(
+            `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id)
+             VALUES (?, ?, datetime('now'), 'pending', 0, ?, NULL, 'task', ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            task.id,
+            nextEvenSeq(inDb),
+            task.process_after,
+            task.platform_id,
+            task.channel_type,
+            task.thread_id,
+            JSON.stringify({ prompt: task.prompt, script: task.script }),
+            task.series_id,
+          );
+
+        // Mark central task completed so (a) we don't re-push it on the next
+        // sweep tick, (b) the central recurrence handler picks it up on the
+        // next tick and inserts the next occurrence (same series_id, new id,
+        // next cron-computed process_after).
+        markCentralTaskCompleted(centralDb, task.id);
+
+        log.info('Pushed central task to session inbound.db', {
+          taskId: task.id,
+          sessionId: targetSession.id,
+        });
+
+        // Wake the container if it's not running
+        if (!isContainerRunning(targetSession.id)) {
+          await wakeContainer(targetSession);
+        }
+      } finally {
+        inDb.close();
+      }
+    } catch (err) {
+      log.error('Failed to push central task to session', { taskId: task.id, err });
+    }
+  }
+
+  // Return the next due time
+  const nextDueStr = getNextDueTime(centralDb);
+  return nextDueStr ? new Date(nextDueStr + 'Z').getTime() : null;
 }
 
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
@@ -261,21 +463,11 @@ function enforceRunningContainerSla(
   resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
 }
 
-export function _resetStuckProcessingRowsForTesting(
-  inDb: Database.Database,
-  outDb: Database.Database,
-  session: Session,
-  reason: string,
-): void {
-  resetStuckProcessingRows(inDb, outDb, session, reason, outDb);
-}
-
 function resetStuckProcessingRows(
   inDb: Database.Database,
   outDb: Database.Database,
   session: Session,
   reason: string,
-  writableOutDb?: Database.Database,
 ): void {
   const claims = getProcessingClaims(outDb);
   const now = Date.now();
@@ -286,7 +478,7 @@ function resetStuckProcessingRows(
     // Already rescheduled for a future retry — don't bump tries again. The
     // wake path (sweep step 2) will fire when process_after elapses and a
     // fresh container will clean the orphan claim on startup.
-    if (msg.processAfter && parseSqliteUtc(msg.processAfter) > now) continue;
+    if (msg.processAfter && Date.parse(msg.processAfter) > now) continue;
 
     if (msg.tries >= MAX_TRIES) {
       markMessageFailed(inDb, msg.id);
@@ -306,23 +498,5 @@ function resetStuckProcessingRows(
         reason,
       });
     }
-  }
-
-  // Drop the orphan 'processing' rows. Without this, the next sweep tick
-  // would re-read them, see the old status_changed timestamp, conclude the
-  // freshly respawned container is stuck, and SIGKILL it before its
-  // agent-runner has a chance to run clearStaleProcessingAcks() on startup.
-  const ownsDb = !writableOutDb;
-  let useDb: Database.Database | null = writableOutDb ?? null;
-  try {
-    if (!useDb) useDb = openOutboundDbRw(session.agent_group_id, session.id);
-    const cleared = deleteOrphanProcessingClaims(useDb);
-    if (cleared > 0) {
-      log.info('Cleared orphan processing claims', { sessionId: session.id, cleared, reason });
-    }
-  } catch (err) {
-    log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
-  } finally {
-    if (ownsDb) useDb?.close();
   }
 }

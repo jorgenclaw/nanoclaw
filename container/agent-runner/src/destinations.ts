@@ -102,30 +102,53 @@ function buildDestinationsSection(): string {
     ].join('\n');
   }
 
-  const lines = ['## Sending messages', ''];
+  // Single-destination shortcut: the agent just writes its response normally.
   if (all.length === 1) {
     const d = all[0];
     const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
-    lines.push(`Your destination is \`${d.name}\`${label}.`);
-  } else {
-    lines.push('You can send messages to the following destinations:', '');
-    for (const d of all) {
-      const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
-      lines.push(`- \`${d.name}\`${label}`);
-    }
+    return [
+      '## Sending messages',
+      '',
+      `Your messages are delivered to \`${d.name}\`${label}. Just write your response directly — no special wrapping needed.`,
+      '',
+      'To mark something as scratchpad (logged but not sent), wrap it in `<internal>...</internal>`.',
+      '',
+      'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool.',
+      '',
+      buildNeverSilentSection(),
+    ].join('\n');
+  }
+
+  const lines = ['## Sending messages', '', 'You can send messages to the following destinations:', ''];
+  for (const d of all) {
+    const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
+    lines.push(`- \`${d.name}\`${label}`);
   }
   lines.push('');
-  lines.push('**Every response must be wrapped** in a `<message to="name">...</message>` block.');
+  lines.push('To send a message, wrap it in a `<message to="name">...</message>` block.');
   lines.push('You can include multiple `<message>` blocks in one response to send to multiple destinations.');
   lines.push('Text outside of `<message>` blocks is scratchpad — logged but not sent anywhere.');
   lines.push('Use `<internal>...</internal>` to make scratchpad intent explicit.');
   lines.push('');
   lines.push(
-    '**Default routing**: when replying to an incoming message, address the same destination the message came `from` — every inbound `<message>` tag carries a `from="name"` attribute that names the origin destination. Only address a different destination when the request itself asks you to (e.g., "tell Laura that…").',
-  );
-  lines.push('');
-  lines.push(
     'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool with the `to` parameter set to a destination name.',
   );
+  lines.push('');
+  lines.push(buildNeverSilentSection());
   return lines.join('\n');
+}
+
+function buildNeverSilentSection(): string {
+  return [
+    '### Never end a turn silently',
+    '',
+    'Every turn must produce at least one user-visible message. A turn that contains only `<internal>...</internal>` (or only tool-calls with no message at the end) is a contract violation — the user receives nothing and assumes you crashed.',
+    '',
+    'If you hit an obstacle and cannot complete the request:',
+    '- **Preferred:** call the `report_failure` MCP tool with a plain-language `reason` (1–4 sentences). It delivers the explanation to the user for you and ends the turn cleanly.',
+    '- **Or:** call `ask_user_question` if a clarification would let you proceed.',
+    '- **Or:** write your explanation as the normal user-facing message (in `<message to="...">` for multi-destination, or plain text for single-destination).',
+    '',
+    'Do **not** wrap your entire turn in `<internal>` and stop. Do **not** end a turn with only tool-calls. The user is waiting — say something to them.',
+  ].join('\n');
 }

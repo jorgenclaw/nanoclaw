@@ -6,8 +6,12 @@
  */
 import path from 'path';
 
-import { DATA_DIR } from './config.js';
+import { CREDENTIAL_PROXY_PORT, DATA_DIR, MCP_SERVER_ENABLED } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
+import { startCredentialProxy } from './credential-proxy.js';
+import { initHealthMonitor } from './health.js';
+import { loadSecurityPolicy } from './security-policy.js';
+import { startMcpServer } from './mcp-server.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
@@ -171,6 +175,24 @@ async function main(): Promise<void> {
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
+
+  // 8. Scott's customization stack: security policy, health monitor, credential proxy, optional MCP server
+  loadSecurityPolicy();
+  initHealthMonitor({
+    async sendAlert(text: string): Promise<void> {
+      // Health alerts go to nanoclaw.error.log for now;
+      // a future enhancement could route to Scott's signal/watch channel.
+      log.error(text);
+    },
+  });
+  startCredentialProxy(CREDENTIAL_PROXY_PORT, '127.0.0.1').catch((err) => {
+    log.error('Credential proxy failed to start', { err });
+  });
+  if (MCP_SERVER_ENABLED) {
+    startMcpServer().catch((err) => {
+      log.error('MCP server failed to start', { err });
+    });
+  }
 
   log.info('NanoClaw running');
 }

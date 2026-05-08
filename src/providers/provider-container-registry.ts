@@ -29,6 +29,8 @@ export interface ProviderContainerContext {
   agentGroupId: string;
   /** `process.env` at spawn time — pull passthrough values from here. */
   hostEnv: NodeJS.ProcessEnv;
+  /** Per-group env from container.json (Scott's customization layer). */
+  containerEnv?: Record<string, string>;
 }
 
 export interface ProviderContainerContribution {

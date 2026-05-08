@@ -1,18 +1,11 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
-import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
-import {
-  formatMessages,
-  extractRouting,
-  categorizeMessage,
-  isClearCommand,
-  isRunnerCommand,
-  stripInternalTags,
-  type RoutingContext,
-} from './formatter.js';
+import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { getStoredSessionId, setStoredSessionId, clearStoredSessionId } from './db/session-state.js';
+import { getSessionRouting } from './db/session-routing.js';
+import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+import { setActiveRouting } from './active-routing.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -28,12 +21,6 @@ function generateId(): string {
 
 export interface PollLoopConfig {
   provider: AgentProvider;
-  /**
-   * Name of the provider (e.g. "claude", "codex", "opencode"). Used to key
-   * the stored continuation per-provider so flipping providers doesn't
-   * resurrect a stale id from a different backend.
-   */
-  providerName: string;
   cwd: string;
   systemContext?: {
     instructions?: string;
@@ -54,9 +41,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
   // provider decides how to use it (Claude resumes a .jsonl transcript,
-  // other providers may reload a thread ID, etc.). Keyed per-provider so
-  // a Codex thread id never gets handed to Claude or vice versa.
-  let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
+  // other providers may reload a thread ID, etc.).
+  let continuation: string | undefined = getStoredSessionId();
 
   if (continuation) {
     log(`Resuming agent session ${continuation}`);
@@ -99,6 +85,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markProcessing(ids);
 
     const routing = extractRouting(messages);
+    setActiveRouting(routing);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -110,7 +97,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
-        clearContinuation(config.providerName);
+        clearStoredSessionId();
         writeMessageOut({
           id: generateId(),
           kind: 'chat',
@@ -159,6 +146,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // Auto-transcribe audio attachments before formatting
+    const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+    keep = await autoTranscribeMessages(keep);
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
@@ -175,14 +166,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
+        setStoredSessionId(continuation);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -194,7 +182,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if (continuation && config.provider.isSessionInvalid(err)) {
         log(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
-        clearContinuation(config.providerName);
+        clearStoredSessionId();
       }
 
       // Write error response so the user knows something went wrong
@@ -206,8 +194,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         thread_id: routing.threadId,
         content: JSON.stringify({ text: `Error: ${errMsg}` }),
       });
-    } finally {
-      clearCurrentInReplyTo();
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -259,96 +245,43 @@ async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
-  providerName: string,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
-  // We do NOT force-end the stream on silence — keeping the query open avoids
-  // re-spawning the SDK subprocess (~few seconds) and re-loading the .jsonl
-  // transcript on every turn. The Anthropic prompt cache is server-side with
-  // a 5-min TTL keyed on prefix hash, so stream lifecycle does NOT affect
-  // cache lifetime — close+reopen within 5 min still gets cache hits.
+  // We do NOT force-end the stream on silence — keeping the query open is
+  // strictly cheaper than close+reopen (no cold prompt cache, no reconnect).
   // Stream liveness is decided host-side via the heartbeat file + processing
   // claim age (see src/host-sweep.ts); if something is truly stuck, the host
   // will kill the container and messages get reset to pending.
-  let pollInFlight = false;
-  let endedForCommand = false;
-  const pollHandle = setInterval(() => {
-    if (done || pollInFlight || endedForCommand) return;
-    pollInFlight = true;
+  const pollHandle = setInterval(async () => {
+    if (done) return;
 
-    void (async () => {
-      try {
-        const pending = getPendingMessages();
+    // Skip system messages (MCP tool responses) and /clear (needs fresh query).
+    // Thread routing is the router's concern — if a message landed in this
+    // session, the agent should see it. Per-thread sessions already isolate
+    // threads into separate containers; shared sessions intentionally merge
+    // everything. Filtering on thread_id here caused deadlocks when the
+    // initial batch and follow-ups had mismatched thread_ids (e.g. a
+    // host-generated welcome trigger with null thread vs a Discord DM reply).
+    const newMessages = getPendingMessages().filter((m) => {
+      if (m.kind === 'system') return false;
+      if ((m.kind === 'chat' || m.kind === 'chat-sdk') && isClearCommand(m)) return false;
+      return true;
+    });
+    if (newMessages.length > 0) {
+      const newIds = newMessages.map((m) => m.id);
+      markProcessing(newIds);
 
-        // Slash commands need a fresh query: /clear resets the SDK's
-        // resume id (fixed at sdkQuery() time); admin/passthrough commands
-        // (/compact, /cost, …) only dispatch when they're the first input
-        // of a query — pushed mid-stream they arrive as plain text and
-        // the SDK never runs them. End the stream and leave the rows
-        // pending; the outer loop handles them on next iteration via the
-        // canonical command path + formatMessagesWithCommands.
-        if (pending.some((m) => isRunnerCommand(m))) {
-          log('Pending slash command — ending stream so outer loop can process');
-          endedForCommand = true;
-          query.end();
-          return;
-        }
+      const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+      const preprocessed = await autoTranscribeMessages(newMessages);
+      const prompt = formatMessages(preprocessed);
+      log(`Pushing ${newMessages.length} follow-up message(s) into active query`);
+      query.push(prompt);
 
-        // Skip system messages (MCP tool responses).
-        // Thread routing is the router's concern — if a message landed in this
-        // session, the agent should see it. Per-thread sessions already isolate
-        // threads into separate containers; shared sessions intentionally merge
-        // everything. Filtering on thread_id here caused deadlocks when the
-        // initial batch and follow-ups had mismatched thread_ids (e.g. a
-        // host-generated welcome trigger with null thread vs a Discord DM reply).
-        const newMessages = pending.filter((m) => m.kind !== 'system');
-        if (newMessages.length === 0) return;
-
-        const newIds = newMessages.map((m) => m.id);
-        markProcessing(newIds);
-
-        // Run pre-task scripts on follow-ups too — without this, a task that
-        // arrives during an active query (e.g. a */10 monitoring cron) bypasses
-        // its script gate and always wakes the agent, defeating the gate.
-        // Mirrors the initial-batch hook above.
-        let keep = newMessages;
-        let skipped: string[] = [];
-        // MODULE-HOOK:scheduling-pre-task-followup:start
-        const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
-        const preTask = await applyPreTaskScripts(newMessages);
-        keep = preTask.keep;
-        skipped = preTask.skipped;
-        if (skipped.length > 0) {
-          markCompleted(skipped);
-          log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.join(', ')}`);
-        }
-        // MODULE-HOOK:scheduling-pre-task-followup:end
-
-        if (keep.length === 0) return;
-        // Re-check done — the outer query may have finished while the script
-        // was awaited. Pushing into a closed stream is wasted work; the
-        // claimed messages get released by the host's processing-claim sweep.
-        if (done) return;
-
-        const keptIds = keep.map((m) => m.id);
-        const prompt = formatMessages(keep);
-        log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        query.push(prompt);
-        markCompleted(keptIds);
-      } catch (err) {
-        // Without this catch the rejection escapes the void IIFE and Node
-        // terminates the container on unhandled-rejection. The initial-batch
-        // path is wrapped by processQuery's outer try/catch; the follow-up
-        // path is not, so it needs its own.
-        const errMsg = err instanceof Error ? err.message : String(err);
-        log(`Follow-up poll error: ${errMsg}`);
-      } finally {
-        pollInFlight = false;
-      }
-    })();
+      markCompleted(newIds);
+    }
   }, ACTIVE_POLL_INTERVAL_MS);
 
   try {
@@ -364,7 +297,7 @@ async function processQuery(
         // container died between `init` and `result`, the SDK session was
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
-        setContinuation(providerName, event.continuation);
+        setStoredSessionId(event.continuation);
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
@@ -375,23 +308,6 @@ async function processQuery(
         markCompleted(initialBatchIds);
         if (event.text) {
           dispatchResultText(event.text, routing);
-        }
-      } else if (event.type === 'compacted') {
-        // The SDK auto-compacted the conversation. After compaction the
-        // model often drops the learned `<message to="…">` wrapping
-        // discipline (the destinations are still in the system prompt,
-        // but the behavioral pattern is summarized away). Inject a
-        // reminder back into the live query so the next turn re-anchors
-        // on the destination model. Only do this when there's >1
-        // destination — single-destination groups have a fallback that
-        // works without wrapping. See qwibitai/nanoclaw#2325.
-        const destinations = getAllDestinations();
-        if (destinations.length > 1) {
-          const names = destinations.map((d) => d.name).join(', ');
-          query.push(
-            `[system] Context was just compacted. Reminder: you have ${destinations.length} destinations (${names}). ` +
-              `Use <message to="name"> blocks to address them. Bare text goes to the scratchpad fallback only.`,
-          );
         }
       }
     }
@@ -412,15 +328,10 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
       break;
     case 'error':
-      log(
-        `Error: ${event.message} (retryable: ${event.retryable}${event.classification ? `, ${event.classification}` : ''})`,
-      );
+      log(`Error: ${event.message} (retryable: ${event.retryable}${event.classification ? `, ${event.classification}` : ''})`);
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
-      break;
-    case 'compacted':
-      log(`Compacted: ${event.text}`);
       break;
   }
 }
@@ -428,10 +339,14 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 /**
  * Parse the agent's final text for <message to="name">...</message> blocks
  * and dispatch each one to its resolved destination. Text outside of blocks
- * (including <internal>...</internal>) is scratchpad — logged but not sent.
+ * (including <internal>...</internal>) is normally scratchpad — logged but
+ * not sent.
  *
- * The agent must always wrap output in <message to="name">...</message>
- * blocks, even with a single destination. Bare text is scratchpad only.
+ * Single-destination shortcut: if the agent has exactly one configured
+ * destination AND the output contains zero <message> blocks, the entire
+ * cleaned text (with <internal> tags stripped) is sent to that destination.
+ * This preserves the simple case of one user on one channel — the agent
+ * doesn't need to know about wrapping syntax at all.
  */
 function dispatchResultText(text: string, routing: RoutingContext): void {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
@@ -464,56 +379,109 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
 
   const scratchpad = stripInternalTags(scratchpadParts.join(''));
 
+  // Single-destination shortcut: the agent wrote plain text — send to
+  // the session's originating channel (from session_routing) if available,
+  // otherwise fall back to the single destination.
+  //
+  // We prefer session_routing over the batch's routing context because
+  // routing is captured from the FIRST message of the initial batch
+  // (extractRouting in poll-loop). When follow-up messages get pushed
+  // into an active query, the lead-row routing leaks into their replies —
+  // e.g., a stale recurring task with a dead JID landing first causes
+  // every subsequent watch tap or DM in the same turn to be addressed
+  // back to the dead JID. session_routing is the canonical destination
+  // committed by the host for this session and never drifts.
+  if (sent === 0 && scratchpad) {
+    const sessionRouting = getSessionRouting();
+    if (sessionRouting.channel_type && sessionRouting.platform_id) {
+      writeMessageOut({
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        kind: 'chat',
+        platform_id: sessionRouting.platform_id,
+        channel_type: sessionRouting.channel_type,
+        thread_id: sessionRouting.thread_id,
+        content: JSON.stringify({ text: scratchpad }),
+      });
+      return;
+    }
+    if (routing.channelType && routing.platformId) {
+      writeMessageOut({
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        kind: 'chat',
+        platform_id: routing.platformId,
+        channel_type: routing.channelType,
+        thread_id: routing.threadId,
+        content: JSON.stringify({ text: scratchpad }),
+      });
+      return;
+    }
+    const all = getAllDestinations();
+    if (all.length === 1) {
+      sendToDestination(all[0], scratchpad, routing);
+      return;
+    }
+  }
+
   if (scratchpad) {
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
   if (sent === 0 && text.trim()) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    // Fallback: surface a brief notice + the internal text (truncated) to the
+    // session's originating channel so the user knows the turn silently
+    // failed. Without this the user just sees nothing back. Common with
+    // smaller models that stay inside <internal> when they hit an obstacle
+    // and never switch into <message to="..."> mode.
+    const sessionRouting = getSessionRouting();
+    const dest =
+      sessionRouting.channel_type && sessionRouting.platform_id
+        ? {
+            platformId: sessionRouting.platform_id,
+            channelType: sessionRouting.channel_type,
+            threadId: sessionRouting.thread_id,
+          }
+        : routing.channelType && routing.platformId
+          ? {
+              platformId: routing.platformId,
+              channelType: routing.channelType,
+              threadId: routing.threadId,
+            }
+          : null;
+    if (dest) {
+      const internal = text.trim();
+      const preview = internal.length > 800 ? internal.slice(0, 800) + '…' : internal;
+      const body = `⚠️ Internal-only output — I didn't produce a user-facing reply this turn. Internal text:\n\n${preview}`;
+      writeMessageOut({
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        kind: 'chat',
+        platform_id: dest.platformId,
+        channel_type: dest.channelType,
+        thread_id: dest.threadId,
+        content: JSON.stringify({ text: body }),
+      });
+    }
   }
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Resolve thread_id per-destination from the most recent inbound message
-  // that came from this same channel+platform. In agent-shared sessions,
-  // different destinations have different thread contexts — using a single
-  // routing.threadId would stamp one channel's thread onto another.
-  const destRouting = resolveDestinationThread(channelType, platformId);
+  // Inherit thread_id from the inbound routing context so replies land in the
+  // same thread the conversation is in. For non-threaded adapters the router
+  // strips thread_id at ingest, so this will already be null.
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: routing.inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
+    thread_id: routing.threadId,
     content: JSON.stringify({ text: body }),
   });
-}
-
-/**
- * Find the thread_id and message id from the most recent inbound message
- * matching the given channel+platform. Returns null if no match found.
- */
-function resolveDestinationThread(
-  channelType: string,
-  platformId: string,
-): { threadId: string | null; inReplyTo: string | null } | null {
-  try {
-    const db = getInboundDb();
-    const row = db
-      .prepare(
-        `SELECT thread_id, id FROM messages_in
-         WHERE channel_type = ? AND platform_id = ?
-         ORDER BY seq DESC LIMIT 1`,
-      )
-      .get(channelType, platformId) as { thread_id: string | null; id: string } | undefined;
-    if (row) return { threadId: row.thread_id, inReplyTo: row.id };
-  } catch (err) {
-    log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return null;
 }
 
 function sleep(ms: number): Promise<void> {

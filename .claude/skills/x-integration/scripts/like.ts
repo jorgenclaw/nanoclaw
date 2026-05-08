@@ -1,56 +1,41 @@
 #!/usr/bin/env pnpm exec tsx
 /**
- * X Integration - Like Tweet
- * Usage: echo '{"tweetUrl":"https://x.com/user/status/123"}' | pnpm exec tsx like.ts
+ * X like — like a tweet.
  */
 
-import { getBrowserContext, navigateToTweet, runScript, config, ScriptResult } from '../lib/browser.js';
+import { getBrowserContext, navigateToTweet, runScript, config, ScriptResult, ensureLoggedIn, captureFailure } from '../lib/browser.js';
+import { X_SELECTORS } from '../lib/locators.js';
 
-interface LikeInput {
-  tweetUrl: string;
-}
+interface Input { tweetUrl: string }
 
-async function likeTweet(input: LikeInput): Promise<ScriptResult> {
-  const { tweetUrl } = input;
+async function likeTweet(input: Input): Promise<ScriptResult> {
+  if (!input.tweetUrl) return { success: false, message: 'tweetUrl required.' };
 
-  if (!tweetUrl) {
-    return { success: false, message: 'Please provide a tweet URL' };
-  }
-
-  let context = null;
+  const context = await getBrowserContext();
   try {
-    context = await getBrowserContext();
-    const { page, success, error } = await navigateToTweet(context, tweetUrl);
+    const nav = await navigateToTweet(context, input.tweetUrl);
+    if (!nav.success) return { success: false, message: nav.error || 'Navigation failed.' };
+    const auth = await ensureLoggedIn(nav.page);
+    if (auth) return auth;
 
-    if (!success) {
-      return { success: false, message: error || 'Navigation failed' };
+    const article = nav.page.locator(X_SELECTORS.tweet).first();
+    if (await article.locator(X_SELECTORS.unlike).isVisible().catch(() => false)) {
+      return { success: true, message: 'Already liked (no-op).' };
     }
-
-    const tweet = page.locator('article[data-testid="tweet"]').first();
-    const unlikeButton = tweet.locator('[data-testid="unlike"]');
-    const likeButton = tweet.locator('[data-testid="like"]');
-
-    // Check if already liked
-    const alreadyLiked = await unlikeButton.isVisible().catch(() => false);
-    if (alreadyLiked) {
-      return { success: true, message: 'Tweet already liked' };
+    const btn = article.locator(X_SELECTORS.like);
+    await btn.waitFor({ timeout: config.timeouts.elementWait });
+    await btn.click();
+    await nav.page.waitForTimeout(config.timeouts.afterClick);
+    if (await article.locator(X_SELECTORS.unlike).isVisible().catch(() => false)) {
+      return { success: true, message: 'Liked.' };
     }
-
-    await likeButton.waitFor({ timeout: config.timeouts.elementWait });
-    await likeButton.click();
-    await page.waitForTimeout(config.timeouts.afterClick);
-
-    // Verify
-    const nowLiked = await unlikeButton.isVisible().catch(() => false);
-    if (nowLiked) {
-      return { success: true, message: 'Like successful' };
-    }
-
-    return { success: false, message: 'Like action completed but could not verify success' };
-
+    await captureFailure(nav.page, 'like-no-verify');
+    return { success: false, message: 'Click registered but unlike-state not visible — verify manually.' };
+  } catch (err) {
+    return { success: false, message: `like error: ${err instanceof Error ? err.message : String(err)}` };
   } finally {
-    if (context) await context.close();
+    await context.close();
   }
 }
 
-runScript<LikeInput>(likeTweet);
+runScript<Input>(likeTweet);

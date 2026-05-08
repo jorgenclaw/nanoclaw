@@ -1,0 +1,255 @@
+#!/bin/bash
+# MoltBook CLI - Interact with MoltBook API
+# Credential resolution: MOLTBOOK_API_KEY env var (preferred)
+# → /workspace/agent/config/moltbook_credentials.json (fallback)
+# Uses node for JSON (python3 not available in container image).
+
+set -e
+
+# Resolve API key: env var wins over file. File path remains for local/dev
+# setups; containers spawned from NanoClaw get the key via container env.
+if [ -n "${MOLTBOOK_API_KEY:-}" ]; then
+    API_KEY="$MOLTBOOK_API_KEY"
+else
+    CREDS_FILE="${MOLTBOOK_CREDS_FILE:-/workspace/agent/config/moltbook_credentials.json}"
+    if [ ! -f "$CREDS_FILE" ]; then
+        echo "Error: MOLTBOOK_API_KEY env var not set and no credentials file at $CREDS_FILE" >&2
+        echo "Set MOLTBOOK_API_KEY in host .env or create the credentials file." >&2
+        exit 1
+    fi
+    API_KEY=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$CREDS_FILE','utf8')).api_key)")
+fi
+
+API_BASE="${MOLTBOOK_API_BASE:-https://www.moltbook.com/api/v1}"
+
+# JSON helpers (node since python3 isn't in the container)
+json_encode() {
+    # Usage: json_encode key1 val1 key2 val2 ...
+    node -e "
+const kv = process.argv.slice(1);
+const o = {};
+for (let i = 0; i < kv.length; i += 2) o[kv[i]] = kv[i+1];
+console.log(JSON.stringify(o));
+" "$@"
+}
+
+json_pretty() {
+    node -e "
+let buf = '';
+process.stdin.on('data', c => buf += c);
+process.stdin.on('end', () => {
+  try { console.log(JSON.stringify(JSON.parse(buf), null, 2)); }
+  catch { process.stdout.write(buf); }
+});
+"
+}
+
+url_encode() {
+    node -e "console.log(encodeURIComponent(process.argv[1]))" "$1"
+}
+
+api_call() {
+    local method="$1"
+    local endpoint="$2"
+    local data="$3"
+
+    if [ -z "$data" ]; then
+        curl -s -X "$method" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json" \
+            "${API_BASE}${endpoint}" | json_pretty
+    else
+        curl -s -X "$method" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$data" \
+            "${API_BASE}${endpoint}" | json_pretty
+    fi
+}
+
+case "$1" in
+    me)
+        api_call GET "/agents/me"
+        ;;
+
+    profile)
+        if [ -z "$2" ]; then
+            echo "Usage: moltbook profile @username"
+            exit 1
+        fi
+        username="${2#@}"
+        api_call GET "/agents/$username"
+        ;;
+
+    post)
+        if [ -z "$2" ]; then
+            echo "Usage: moltbook post \"title\" [\"content\"] [--submolt m/name]"
+            exit 1
+        fi
+
+        title="$2"
+        content="${3:-}"
+        submolt="general"
+
+        shift 2
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --submolt)
+                    submolt="${2#m/}"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+
+        if [ -z "$content" ]; then
+            data=$(json_encode title "$title" submolt_name "$submolt")
+        else
+            data=$(json_encode title "$title" content "$content" submolt_name "$submolt")
+        fi
+        api_call POST "/posts" "$data"
+        ;;
+
+    comment)
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Usage: moltbook comment POST_ID \"reply text\""
+            exit 1
+        fi
+
+        data=$(json_encode content "$3")
+        api_call POST "/posts/$2/comments" "$data"
+        ;;
+
+    upvote)
+        if [ -z "$2" ]; then
+            echo "Usage: moltbook upvote POST_ID"
+            exit 1
+        fi
+        api_call POST "/posts/$2/upvote"
+        ;;
+
+    downvote)
+        if [ -z "$2" ]; then
+            echo "Usage: moltbook downvote POST_ID"
+            exit 1
+        fi
+        api_call POST "/posts/$2/downvote"
+        ;;
+
+    feed)
+        submolt=""
+        limit=25
+
+        while [ $# -gt 1 ]; do
+            case "$2" in
+                --submolt)
+                    submolt="${3#m/}"
+                    shift 2
+                    ;;
+                --limit)
+                    limit="$3"
+                    shift 2
+                    ;;
+                *)
+                    shift
+                    ;;
+            esac
+        done
+
+        if [ -n "$submolt" ]; then
+            api_call GET "/submolts/$submolt/feed?limit=$limit"
+        else
+            api_call GET "/feed?limit=$limit"
+        fi
+        ;;
+
+    submolts)
+        api_call GET "/submolts"
+        ;;
+
+    join)
+        if [ -z "$2" ]; then
+            echo "Usage: moltbook join m/name"
+            exit 1
+        fi
+        submolt="${2#m/}"
+        api_call POST "/submolts/$submolt/join"
+        ;;
+
+    leave)
+        if [ -z "$2" ]; then
+            echo "Usage: moltbook leave m/name"
+            exit 1
+        fi
+        submolt="${2#m/}"
+        api_call POST "/submolts/$submolt/leave"
+        ;;
+
+    create-submolt)
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Usage: moltbook create-submolt name \"Display Name\" \"description\""
+            exit 1
+        fi
+
+        name="$2"
+        display_name="$3"
+        description="$4"
+
+        if [ -z "$description" ]; then
+            display_name="$2"
+            description="$3"
+        fi
+
+        data=$(json_encode name "$name" display_name "$display_name" description "$description")
+        api_call POST "/submolts" "$data"
+        ;;
+
+    search)
+        if [ -z "$2" ]; then
+            echo "Usage: moltbook search \"query\""
+            exit 1
+        fi
+        query=$(url_encode "$2")
+        api_call GET "/search?q=$query"
+        ;;
+
+    dm)
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Usage: moltbook dm @username \"message\""
+            exit 1
+        fi
+        username="${2#@}"
+        data=$(json_encode text "$3")
+        api_call POST "/agents/$username/dm" "$data"
+        ;;
+
+    inbox)
+        api_call GET "/dm/inbox"
+        ;;
+
+    *)
+        echo "MoltBook CLI - Commands:"
+        echo "  me                          Get your profile"
+        echo "  profile @username           Get agent profile"
+        echo "  post \"text\"                 Create post"
+        echo "  post \"text\" --submolt m/x   Post to submolt"
+        echo "  comment ID \"text\"           Reply to post"
+        echo "  upvote ID                   Upvote post"
+        echo "  feed                        Get main feed"
+        echo "  feed --submolt m/x          Get submolt feed"
+        echo "  submolts                    List submolts"
+        echo "  join m/name                 Join submolt"
+        echo "  leave m/name                Leave submolt"
+        echo "  create-submolt name \"desc\"  Create submolt"
+        echo "  search \"query\"              Search"
+        echo "  dm @user \"message\"          Send DM"
+        echo "  inbox                       Check DMs"
+        echo ""
+        echo "Credential resolution: MOLTBOOK_API_KEY env var (preferred)"
+        echo "                       → \$MOLTBOOK_CREDS_FILE or"
+        echo "                         /workspace/agent/config/moltbook_credentials.json"
+        exit 1
+        ;;
+esac

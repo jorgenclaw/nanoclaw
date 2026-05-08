@@ -13,6 +13,7 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -20,14 +21,27 @@ import {
   TIMEZONE,
 } from './config.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_HOST_GATEWAY,
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+// Channel host-side config barrel — channels that ship container-side
+// infrastructure (e.g. nostr-dm's signing-socket bind-mount) self-register
+// on import.
+import './channels/index.js';
+import { getChannelContainerConfig, getRegisteredChannelNames } from './channels/channel-registry.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -58,7 +72,7 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  * a duplicate container against the same session directory, producing
  * racy double-replies.
  */
-const wakePromises = new Map<string, Promise<boolean>>();
+const wakePromises = new Map<string, Promise<void>>();
 
 export function getActiveContainerCount(): number {
   return activeContainers.size;
@@ -73,32 +87,20 @@ export function isContainerRunning(sessionId: string): boolean {
  * (the in-flight wake promise is reused).
  *
  * The container runs the v2 agent-runner which polls the session DB.
- *
- * Contract: never throws. Returns `true` on successful spawn, `false` on
- * transient spawn failure (e.g. OneCLI gateway unreachable). Callers don't
- * need to wrap — the inbound row stays pending and host-sweep retries on
- * its next tick. Callers that care (e.g. the router's typing indicator)
- * can branch on the boolean.
  */
-export function wakeContainer(session: Session): Promise<boolean> {
+export function wakeContainer(session: Session): Promise<void> {
   if (activeContainers.has(session.id)) {
     log.debug('Container already running', { sessionId: session.id });
-    return Promise.resolve(true);
+    return Promise.resolve();
   }
   const existing = wakePromises.get(session.id);
   if (existing) {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
   }
-  const promise = spawnContainer(session)
-    .then(() => true)
-    .catch((err) => {
-      log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
-      return false;
-    })
-    .finally(() => {
-      wakePromises.delete(session.id);
-    });
+  const promise = spawnContainer(session).finally(() => {
+    wakePromises.delete(session.id);
+  });
   wakePromises.set(session.id, promise);
   return promise;
 }
@@ -203,37 +205,19 @@ export function killContainer(sessionId: string, reason: string): void {
   }
 }
 
-/**
- * Resolve the provider name for a session using the precedence documented in
- * the provider-install skills:
- *
- *   sessions.agent_provider
- *     → agent_groups.agent_provider
- *     → container.json `provider`
- *     → 'claude'
- *
- * Pure so the precedence can be unit-tested without a DB or filesystem.
- */
-export function resolveProviderName(
-  sessionProvider: string | null | undefined,
-  agentGroupProvider: string | null | undefined,
-  containerConfigProvider: string | null | undefined,
-): string {
-  return (sessionProvider || agentGroupProvider || containerConfigProvider || 'claude').toLowerCase();
-}
-
 function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
-  const provider = resolveProviderName(session.agent_provider, agentGroup.agent_provider, containerConfig.provider);
+  const provider = (containerConfig.provider || 'claude').toLowerCase();
   const fn = getProviderContainerConfig(provider);
   const contribution = fn
     ? fn({
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
         hostEnv: process.env,
+        containerEnv: containerConfig.env || {},
       })
     : {};
   return { provider, contribution };
@@ -324,6 +308,26 @@ function buildMounts(
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
     mounts.push(...validated);
+  }
+
+  // Channel-contributed mounts (e.g. nostr-dm's signing socket + clawstr-post).
+  // Applied to every container regardless of whether the channel is wired to
+  // the agent group — these are cross-cutting tools (clawstr-post, signer
+  // socket) that any agent may invoke. Missing host paths are skipped so a
+  // stale registration can't break unrelated containers.
+  for (const name of getRegisteredChannelNames()) {
+    const cfg = getChannelContainerConfig(name);
+    if (!cfg?.mounts) continue;
+    for (const m of cfg.mounts) {
+      if (!fs.existsSync(m.hostPath)) {
+        log.warn('Skipping channel mount — host path missing', {
+          channel: name,
+          hostPath: m.hostPath,
+        });
+        continue;
+      }
+      mounts.push(m);
+    }
   }
 
   // Provider-contributed mounts (e.g. opencode-xdg)
@@ -447,18 +451,50 @@ async function buildContainerArgs(
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  // are routed through the agent vault for credential injection.
+  //
+  // IMPORTANT: Claude OAuth tokens (sk-ant-oat01-...) don't work through
+  // OneCLI's simple HTTPS proxy — they require the Claude Agent SDK's
+  // specific auth flow which our native credential proxy implements. We
+  // exclude api.anthropic.com from OneCLI and route Anthropic calls to
+  // the native proxy via ANTHROPIC_BASE_URL below. OneCLI handles the
+  // rest (future generic secrets we register for other services).
+  try {
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (onecliApplied) {
+      // The SDK emits HTTPS_PROXY/HTTP_PROXY using `host.docker.internal`,
+      // which doesn't resolve when hostGatewayArgs() picks `--network host`
+      // on bare-metal Linux. Rewrite to the docker bridge IP where OneCLI
+      // actually binds (172.17.0.1:10255) so proxying works regardless of
+      // the container's networking mode.
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === '-e' && typeof args[i + 1] === 'string' && args[i + 1].includes('host.docker.internal')) {
+          args[i + 1] = args[i + 1].replace(/host\.docker\.internal/g, '172.17.0.1');
+        }
+      }
+      log.info('OneCLI gateway applied', { containerName });
+    } else {
+      log.warn('OneCLI gateway not applied — container will have no credentials', { containerName });
+    }
+  } catch (err) {
+    log.warn('OneCLI gateway error — container will have no credentials', { containerName, err });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+
+  // Anthropic goes through the native credential proxy (OAuth-aware).
+  // NO_PROXY excludes api.anthropic.com from OneCLI's HTTPS_PROXY so the
+  // Claude Agent SDK's requests go directly to our proxy instead.
+  const authMode = detectAuthMode();
+  args.push('-e', `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`);
+  args.push('-e', 'NO_PROXY=api.anthropic.com,localhost,127.0.0.1');
+  args.push('-e', 'no_proxy=api.anthropic.com,localhost,127.0.0.1');
+  if (authMode === 'api-key') {
+    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  } else {
+    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder-oauth-token');
   }
-  log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
   args.push(...hostGatewayArgs());
@@ -480,6 +516,55 @@ async function buildContainerArgs(
     }
   }
 
+  // Main-group-only env vars from .env. Secrets listed here are injected
+  // as container env vars at spawn time, rather than stored in container.json
+  // (readable from inside the agent's workspace) or per-group config files.
+  // The agent never sees raw values in config files — only the process env.
+  //
+  // These are NOT proxied by OneCLI — OneCLI handles HTTPS API auth
+  // injection (Anthropic, OpenAI, Parallel) via HTTPS_PROXY + cert MITM.
+  // The secrets below are for services OneCLI doesn't proxy (WebSocket NWC,
+  // local-IP Proton Bridge IMAP/SMTP, AWS STS, bespoke APIs).
+  const mainSecrets = readEnvFile([
+    'GH_TOKEN',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_REGION',
+    'REMOTION_AWS_BUCKET',
+    'REMOTION_SERVE_URL',
+    'UDIOAPI_PRO_KEY',
+    // Lightning wallet (NWC). Previously in groups/main/config/nwc.json.
+    'NWC_CONNECTION_STRING',
+    // Proton Bridge auth (IMAP/SMTP). container.json mcpServers.proton.env
+    // references these via ${VAR} placeholders; agent-runner resolves them
+    // at MCP-spawn time from the container's process.env.
+    'PROTON_BRIDGE_USERNAME',
+    'PROTON_BRIDGE_PASSWORD',
+    // MoltBook API key. Previously in groups/main/config/moltbook_credentials.json
+    // read by tools/skills/moltbook at runtime. The skill binary now prefers
+    // the env var and only falls back to the file for local/dev setups.
+    'MOLTBOOK_API_KEY',
+  ]);
+  if (agentGroup.folder === 'main') {
+    for (const [key, value] of Object.entries(mainSecrets)) {
+      if (value) args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Per-agent-group env overrides — applied last so they win over OneCLI / native-proxy / mainSecrets.
+  if (containerConfig.env) {
+    for (const [key, value] of Object.entries(containerConfig.env)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Blocked hosts: resolve to 0.0.0.0 so they are unreachable inside the container.
+  if (containerConfig.blockedHosts) {
+    for (const host of containerConfig.blockedHosts) {
+      args.push('--add-host', `${host}:0.0.0.0`);
+    }
+  }
+
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
 
@@ -487,7 +572,20 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  // Pre-bun bootstrap: symlink any executable skill binaries into the node
+  // user's ~/.local/bin so skills that ship binaries (like moltbook) are on
+  // PATH inside the container without needing image rebuilds. Upstream's
+  // syncSkillSymlinks exposes skill DIRECTORIES to Claude; this exposes
+  // the binaries INSIDE those directories as commands.
+  const bootstrap = [
+    'mkdir -p ~/.local/bin',
+    'for f in /home/node/.claude/skills/*/*; do ' +
+      '[ -x "$f" ] && [ ! -d "$f" ] && ln -sf "$f" "$HOME/.local/bin/$(basename "$f")"; ' +
+      'done 2>/dev/null || true',
+    'export PATH="$HOME/.local/bin:$PATH"',
+    'exec bun run /app/src/index.ts',
+  ].join('; ');
+  args.push('-c', bootstrap);
 
   return args;
 }
