@@ -409,7 +409,7 @@ function registerTools(server: McpServer): void {
         .optional()
         .describe('Lightning payment preimage (64 hex chars) — provide after paying the invoice'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_SIGN, 'nostr_sign_event');
@@ -463,7 +463,7 @@ function registerTools(server: McpServer): void {
         .optional()
         .describe('Lightning payment preimage (64 hex chars) — provide after paying the invoice'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_PUBLISH, 'nostr_publish_event');
@@ -528,7 +528,7 @@ function registerTools(server: McpServer): void {
         .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_POST_NOTE, 'nostr_post_note');
@@ -578,7 +578,7 @@ function registerTools(server: McpServer): void {
         .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_FETCH_PROFILE, 'nostr_fetch_profile');
@@ -630,7 +630,7 @@ function registerTools(server: McpServer): void {
         .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_ZAP, 'nostr_zap');
@@ -681,7 +681,7 @@ function registerTools(server: McpServer): void {
         .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_GET_NOTES, 'nostr_get_notes');
@@ -730,7 +730,7 @@ function registerTools(server: McpServer): void {
         .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_CREATE_INVOICE, 'lightning_create_invoice');
@@ -780,7 +780,7 @@ function registerTools(server: McpServer): void {
         .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_ACTION_RECEIPT, 'create_action_receipt');
@@ -855,7 +855,7 @@ function registerTools(server: McpServer): void {
         .describe('Your name@jorgenclaw.ai NIP-05 identity — if registered, first 200 calls/month are free'),
       payment_preimage: z.string().optional().describe('Lightning payment preimage (64 hex chars)'),
     },
-    async (args) => {
+    async (args: any) => {
       const free = await isFreeTierCall(args.nip05);
       if (!free && !args.payment_preimage) {
         const bolt11 = generateInvoice(TOOL_PRICE_VERIFY_RECEIPT, 'verify_receipt');
