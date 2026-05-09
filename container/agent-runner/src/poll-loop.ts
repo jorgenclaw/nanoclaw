@@ -272,12 +272,10 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
 
-  // Snapshot the outbound count so we can detect a silent turn — the model
-  // ended without writing any user-visible reply (no <message> block, no
-  // send_message MCP call, no scratchpad fallback). When that happens we
-  // write a generic "I couldn't reply" message so the user isn't left
-  // wondering whether the agent crashed.
-  const outboundCountAtStart = getOutboundCount();
+  // Per-turn silent-turn detection happens in the result-event handler
+  // below, not here. processQuery itself doesn't exit between turns —
+  // opencode keeps the session open for follow-ups — so a once-per-query
+  // count check at the bottom of this function would never fire.
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
@@ -336,41 +334,39 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        const beforeDispatch = getOutboundCount();
         if (event.text) {
           dispatchResultText(event.text, routing);
+        }
+        // Per-result silent-turn fallback. processQuery itself doesn't
+        // exit between turns (opencode keeps the session open for
+        // follow-ups), so the only place we can detect "model said
+        // nothing useful this turn" is right after each result event.
+        // If outbound is unchanged AND the result text was either empty
+        // or got suppressed (e.g. hallucinated tool-call syntax), write
+        // a generic 'try again' so the user isn't left wondering.
+        if (getOutboundCount() === beforeDispatch) {
+          const sr = getSessionRouting();
+          if (sr.channel_type && sr.platform_id) {
+            log('Silent turn detected — writing fallback message to user');
+            writeMessageOut({
+              id: generateId(),
+              in_reply_to: routing.inReplyTo,
+              kind: 'chat',
+              platform_id: sr.platform_id,
+              channel_type: sr.channel_type,
+              thread_id: sr.thread_id,
+              content: JSON.stringify({
+                text: "Sorry — I had trouble producing a response that turn. Could you try again, maybe rephrasing?",
+              }),
+            });
+          }
         }
       }
     }
   } finally {
     done = true;
     clearInterval(pollHandle);
-  }
-
-  // Silent-turn fallback: the model produced no <message> block, no
-  // send_message MCP call, and no scratchpad fallback delivery. This is
-  // a contract violation per CLAUDE.md ("Never end a turn silently"), but
-  // some models — especially smaller local ones — hallucinate tool calls
-  // or emit garbled output that doesn't parse, and the user is left with
-  // nothing. Write a generic message so they at least know something
-  // happened.
-  if (getOutboundCount() === outboundCountAtStart) {
-    const sessionRouting = getSessionRouting();
-    if (sessionRouting.channel_type && sessionRouting.platform_id) {
-      log('Silent turn detected — writing fallback message to user');
-      writeMessageOut({
-        id: generateId(),
-        in_reply_to: routing.inReplyTo,
-        kind: 'chat',
-        platform_id: sessionRouting.platform_id,
-        channel_type: sessionRouting.channel_type,
-        thread_id: sessionRouting.thread_id,
-        content: JSON.stringify({
-          text: "Sorry — I had trouble producing a response that turn. Could you try again, maybe rephrasing?",
-        }),
-      });
-    } else {
-      log('Silent turn detected but no session routing — fallback skipped');
-    }
   }
 
   return { continuation: queryContinuation };
