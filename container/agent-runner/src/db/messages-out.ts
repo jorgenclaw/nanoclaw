@@ -42,6 +42,15 @@ export interface WriteMessageOut {
  * by seq across BOTH tables. If inbound and outbound could share a seq,
  * the agent's "edit message #5" could resolve to the wrong row.
  */
+/**
+ * Count of all rows in messages_out. Used to detect a silently-failed turn:
+ * if the count is unchanged before/after a query, the model produced no
+ * user-visible response and the host-side fallback should fire.
+ */
+export function getOutboundCount(): number {
+  return (getOutboundDb().prepare('SELECT COUNT(*) AS c FROM messages_out').get() as { c: number }).c;
+}
+
 export function writeMessageOut(msg: WriteMessageOut): number {
   const outbound = getOutboundDb();
   const inbound = getInboundDb();

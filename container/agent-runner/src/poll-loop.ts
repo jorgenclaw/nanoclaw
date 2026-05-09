@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { writeMessageOut, getOutboundCount } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { getStoredSessionId, setStoredSessionId, clearStoredSessionId } from './db/session-state.js';
 import { getSessionRouting } from './db/session-routing.js';
@@ -17,6 +17,29 @@ function log(msg: string): void {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Recognize when a model has emitted raw tool-call syntax instead of a real
+ * response. Smaller local models (e.g. gemma4:26b) sometimes hallucinate
+ * non-existent tools and then fall back to writing the literal call syntax
+ * as plain text — `call:nanoweb_search{query:...}<tool_call|>` etc. Sending
+ * that raw to the user is worse than nothing; it looks like the agent broke.
+ *
+ * The check is deliberately conservative: we only suppress if the entire
+ * cleaned text is dominated by these markers, so a real reply that happens
+ * to mention a tool name in passing still gets through.
+ */
+function looksLikeHallucinatedToolCall(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  // Hard markers the model emits when its tool-call format is broken.
+  const markers = [/<\|?tool_call\|?>/i, /\bcall:[a-z][a-z0-9_]*\s*\{/i, /<\|"\|>/];
+  const hasMarker = markers.some((re) => re.test(t));
+  if (!hasMarker) return false;
+  // Also require the response to be short — long responses with one
+  // accidental marker probably contain real content too.
+  return t.length < 400;
 }
 
 export interface PollLoopConfig {
@@ -249,6 +272,13 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
 
+  // Snapshot the outbound count so we can detect a silent turn — the model
+  // ended without writing any user-visible reply (no <message> block, no
+  // send_message MCP call, no scratchpad fallback). When that happens we
+  // write a generic "I couldn't reply" message so the user isn't left
+  // wondering whether the agent crashed.
+  const outboundCountAtStart = getOutboundCount();
+
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
   // strictly cheaper than close+reopen (no cold prompt cache, no reconnect).
@@ -316,6 +346,33 @@ async function processQuery(
     clearInterval(pollHandle);
   }
 
+  // Silent-turn fallback: the model produced no <message> block, no
+  // send_message MCP call, and no scratchpad fallback delivery. This is
+  // a contract violation per CLAUDE.md ("Never end a turn silently"), but
+  // some models — especially smaller local ones — hallucinate tool calls
+  // or emit garbled output that doesn't parse, and the user is left with
+  // nothing. Write a generic message so they at least know something
+  // happened.
+  if (getOutboundCount() === outboundCountAtStart) {
+    const sessionRouting = getSessionRouting();
+    if (sessionRouting.channel_type && sessionRouting.platform_id) {
+      log('Silent turn detected — writing fallback message to user');
+      writeMessageOut({
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        kind: 'chat',
+        platform_id: sessionRouting.platform_id,
+        channel_type: sessionRouting.channel_type,
+        thread_id: sessionRouting.thread_id,
+        content: JSON.stringify({
+          text: "Sorry — I had trouble producing a response that turn. Could you try again, maybe rephrasing?",
+        }),
+      });
+    } else {
+      log('Silent turn detected but no session routing — fallback skipped');
+    }
+  }
+
   return { continuation: queryContinuation };
 }
 
@@ -377,7 +434,11 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
     scratchpadParts.push(text.slice(lastIndex));
   }
 
-  const scratchpad = stripInternalTags(scratchpadParts.join(''));
+  const rawScratchpad = stripInternalTags(scratchpadParts.join(''));
+  const scratchpad = looksLikeHallucinatedToolCall(rawScratchpad) ? '' : rawScratchpad;
+  if (rawScratchpad && !scratchpad) {
+    log(`Suppressed hallucinated tool-call output (${rawScratchpad.length} chars) — silent-turn fallback will fire`);
+  }
 
   // Single-destination shortcut: the agent wrote plain text — send to
   // the session's originating channel (from session_routing) if available,
