@@ -405,7 +405,16 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This preserves the simple case of one user on one channel — the agent
  * doesn't need to know about wrapping syntax at all.
  */
-function dispatchResultText(text: string, routing: RoutingContext): void {
+function dispatchResultText(rawText: string, routing: RoutingContext): void {
+  // Suppress hallucinated tool-call text BEFORE any downstream dispatch path
+  // sees it — both the single-destination shortcut and the internal-only
+  // fallback would otherwise forward the garbage to the user.
+  let text = rawText;
+  if (looksLikeHallucinatedToolCall(rawText)) {
+    log(`Suppressed hallucinated tool-call output (${rawText.length} chars) — silent-turn fallback will fire`);
+    text = '';
+  }
+
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -434,11 +443,7 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
     scratchpadParts.push(text.slice(lastIndex));
   }
 
-  const rawScratchpad = stripInternalTags(scratchpadParts.join(''));
-  const scratchpad = looksLikeHallucinatedToolCall(rawScratchpad) ? '' : rawScratchpad;
-  if (rawScratchpad && !scratchpad) {
-    log(`Suppressed hallucinated tool-call output (${rawScratchpad.length} chars) — silent-turn fallback will fire`);
-  }
+  const scratchpad = stripInternalTags(scratchpadParts.join(''));
 
   // Single-destination shortcut: the agent wrote plain text — send to
   // the session's originating channel (from session_routing) if available,
