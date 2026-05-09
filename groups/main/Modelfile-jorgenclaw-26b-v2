@@ -1,0 +1,23 @@
+# gemma4:26b-jorgenclaw-v2 — sampling profile copied from gemma4:31b-coder.
+#
+# Hypothesis: 26b-jorgenclaw v1's high repeat_penalty (1.15) + wide
+# repeat_last_n (256) was disrupting tool-call emission — the same
+# field names (`call`, `query`, `tool_call`) recur across tool-call
+# tokens, and aggressive repetition penalty pushes the sampler off
+# the structured-output trajectory mid-emission. Coder-31b at 1.05 +
+# 64 produces clean tool calls; mirror those settings here.
+#
+# Other tightening (temperature 0.2 -> 0.1, top_k 64 -> 40, top_p
+# 0.9 -> 0.95) increases determinism so the model is less likely
+# to wander into hallucinated tool names.
+#
+# num_predict doubled (8192 -> 16384) to give room for full reasoning
+# + tool call + final <message> block without hitting the cap.
+FROM gemma4:26b
+PARAMETER num_ctx 204800
+PARAMETER num_predict 16384
+PARAMETER repeat_last_n 64
+PARAMETER repeat_penalty 1.05
+PARAMETER temperature 0.1
+PARAMETER top_k 40
+PARAMETER top_p 0.95
