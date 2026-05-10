@@ -28,6 +28,7 @@
 import { execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import Database from 'better-sqlite3';
@@ -137,15 +138,87 @@ function maybeWipeOnModelChange(
   fs.writeFileSync(lastModelPath, currentFingerprint);
 }
 
+/**
+ * Write opencode.json into the per-session XDG dir so the in-container
+ * opencode binary picks up per-model capability flags (most importantly
+ * `attachment: true` for vision-capable Ollama tags). Without a config,
+ * opencode defaults attachment to false for unknown models and silently
+ * tells the model "this provider doesn't support image input" — Read on
+ * `[Image: ...]` paths becomes pointless because the model believes it
+ * has no vision.
+ *
+ * Strategy:
+ *   1. Prefer copying the host user's `~/.config/opencode/opencode.json`
+ *      verbatim — it's already wired against the user's chosen Ollama
+ *      tags and is the source of truth Scott edits when adding models.
+ *   2. Fall back to a minimal generated config keyed off OPENCODE_MODEL,
+ *      enabling attachment + tool_call + reasoning + temperature for the
+ *      single active Ollama model.
+ *   3. If neither apply (no host config, no model env), leave the dir
+ *      empty — opencode falls back to whatever defaults it shipped with.
+ */
+function writeOpencodeConfig(opencodeDir: string, currentModel: string | undefined): void {
+  const configDir = path.join(opencodeDir, 'opencode');
+  fs.mkdirSync(configDir, { recursive: true });
+  const configPath = path.join(configDir, 'opencode.json');
+
+  const hostUserConfig = path.join(os.homedir(), '.config', 'opencode', 'opencode.json');
+  if (fs.existsSync(hostUserConfig)) {
+    try {
+      const raw = fs.readFileSync(hostUserConfig, 'utf8');
+      JSON.parse(raw); // validate
+      fs.writeFileSync(configPath, raw);
+      return;
+    } catch (err) {
+      log.warn('Failed to copy host opencode.json — falling back to generated', {
+        err: (err as Error).message,
+        hostUserConfig,
+      });
+    }
+  }
+
+  if (!currentModel) return;
+
+  const ollamaPrefix = 'ollama/';
+  const isOllama = currentModel.startsWith(ollamaPrefix);
+  const modelId = isOllama ? currentModel.slice(ollamaPrefix.length) : currentModel;
+  const providerName = isOllama ? 'ollama' : 'ollama';
+
+  const config = {
+    $schema: 'https://opencode.ai/config.json',
+    provider: {
+      [providerName]: {
+        npm: '@ai-sdk/openai-compatible',
+        name: 'Ollama (auto-generated)',
+        options: {
+          baseURL: 'http://127.0.0.1:11434/v1',
+        },
+        models: {
+          [modelId]: {
+            attachment: true,
+            tool_call: true,
+            reasoning: true,
+            temperature: true,
+          },
+        },
+      },
+    },
+  };
+
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+}
+
 registerProviderContainerConfig('opencode', (ctx) => {
   const opencodeDir = path.join(ctx.sessionDir, 'opencode-xdg');
   fs.mkdirSync(opencodeDir, { recursive: true });
 
   const currentModel = (ctx.containerEnv ?? {}).OPENCODE_MODEL ?? ctx.hostEnv.OPENCODE_MODEL;
   maybeWipeOnModelChange(opencodeDir, ctx.sessionDir, currentModel, path.basename(ctx.sessionDir));
+  writeOpencodeConfig(opencodeDir, currentModel);
 
   const env: Record<string, string> = {
     XDG_DATA_HOME: '/opencode-xdg',
+    XDG_CONFIG_HOME: '/opencode-xdg',
     NO_PROXY: mergeNoProxy(ctx.hostEnv.NO_PROXY, '127.0.0.1,localhost'),
     no_proxy: mergeNoProxy(ctx.hostEnv.no_proxy, '127.0.0.1,localhost'),
   };

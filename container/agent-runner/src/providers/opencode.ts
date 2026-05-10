@@ -1,11 +1,194 @@
 import { spawn, type ChildProcess } from 'child_process';
+import fs from 'fs';
 import { createServer } from 'net';
+import path from 'path';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
+
+/**
+ * Detect `[Image: <absolute-path>]` markers in user-message text and convert
+ * them into opencode FilePartInput attachments alongside the text part.
+ *
+ * Why: signal.ts (and other channels) inline image attachments as a literal
+ * `[Image: /workspace/attachments/<id>]` line in message text. Without this
+ * conversion, opencode forwards the text marker verbatim to the model and
+ * the model — even on a vision-capable provider — receives no image bytes
+ * and falls back to "I can't see images." See docs/quad-inbox debugging
+ * 2026-05-09 for the full forensic trail.
+ *
+ * Implementation: pure regex over the prompt text, read the referenced files
+ * from disk, base64-encode, and return them as FilePartInput parts. The
+ * original marker stays in the text so the model has caption context. We
+ * silently skip markers whose path is unreadable (file gone, permission
+ * denied) — a missing image isn't worth aborting the whole turn over;
+ * "I tried to look at the attachment but the file is gone" is a perfectly
+ * sensible reply for the model to construct from text alone.
+ *
+ * Sniffer: only paths under known mounts (`/workspace/attachments` for
+ * Signal, `/run/whitenoise/media_cache` for White Noise) are accepted, to
+ * avoid prompt-injection where external content names a host file.
+ */
+const IMAGE_MARKER_RE = /\[Image:\s+(\/[^\]\s]+)\]/g;
+const ALLOWED_IMAGE_ROOTS = ['/workspace/attachments/', '/run/whitenoise/media_cache/'];
+const IMAGE_MIME_BY_EXT: Record<string, string> = {
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
+};
+
+interface FilePartInput {
+  type: 'file';
+  mime: string;
+  filename?: string;
+  url: string;
+}
+
+function extractImageParts(text: string): FilePartInput[] {
+  const parts: FilePartInput[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(IMAGE_MARKER_RE)) {
+    const filePath = match[1];
+    if (seen.has(filePath)) continue;
+    seen.add(filePath);
+    if (!ALLOWED_IMAGE_ROOTS.some((root) => filePath.startsWith(root))) {
+      log(`Skipping image marker outside allowed roots: ${filePath}`);
+      continue;
+    }
+    const ext = path.extname(filePath).toLowerCase();
+    const mime = IMAGE_MIME_BY_EXT[ext];
+    if (!mime) {
+      log(`Skipping image marker with unknown extension: ${filePath}`);
+      continue;
+    }
+    let buf: Buffer;
+    try {
+      buf = fs.readFileSync(filePath);
+    } catch (err) {
+      log(`Skipping unreadable image: ${filePath} (${(err as Error).message})`);
+      continue;
+    }
+    parts.push({
+      type: 'file',
+      mime,
+      filename: path.basename(filePath),
+      url: `data:${mime};base64,${buf.toString('base64')}`,
+    });
+    log(`Attached image: ${filePath} (${buf.length} bytes, ${mime})`);
+  }
+  return parts;
+}
+
+/**
+ * Vision sidecar — transcribe images inline before opencode sees them.
+ *
+ * Why a sidecar: opencode-ai 1.4.17 + @ai-sdk/openai-compatible serializes
+ * user messages as `content: <string>` (legacy OpenAI format). It silently
+ * drops `FilePartInput` parts because the openai-compatible adapter has no
+ * multimodal pipeline. Confirmed empirically via proxy capture 2026-05-10.
+ *
+ * The fix: for each `[Image: /path]` marker in the prompt, call Ollama's
+ * native `/api/chat` endpoint (which DOES support the `images` field with
+ * base64 bytes), get a 1-3 sentence description, and embed it inline next
+ * to the marker. opencode then forwards a text-only message that contains
+ * a model-generated vision summary alongside the original path.
+ *
+ * Tradeoffs:
+ *  - +5-30s latency per image (one extra Ollama vision call before main turn)
+ *  - The agent answers from a description, not raw pixels — fine for chat
+ *    (caption, OCR-lite, identification) but not for fine-grained vision
+ *    work. When opencode adds multimodal support upstream, swap back to
+ *    inline FilePartInput.
+ *  - Requires ANTHROPIC_BASE_URL pointing at an Ollama-OpenAI-compatible
+ *    endpoint and OPENCODE_MODEL naming an Ollama model with `vision`
+ *    capability. Falls back gracefully (log + skip) on any failure.
+ */
+function ollamaNativeUrl(): string | undefined {
+  // ANTHROPIC_BASE_URL is e.g. http://127.0.0.1:11434/v1; native API is at /api/chat.
+  const base = process.env.ANTHROPIC_BASE_URL;
+  if (!base) return undefined;
+  return base.replace(/\/v1\/?$/, '');
+}
+
+function ollamaModelName(): string | undefined {
+  const m = process.env.OPENCODE_MODEL ?? process.env.OPENCODE_SMALL_MODEL;
+  if (!m) return undefined;
+  return m.startsWith('ollama/') ? m.slice('ollama/'.length) : m;
+}
+
+async function transcribeImagesInText(text: string): Promise<string> {
+  const matches = [...text.matchAll(IMAGE_MARKER_RE)];
+  if (matches.length === 0) return text;
+  const ollamaBase = ollamaNativeUrl();
+  const model = ollamaModelName();
+  if (!ollamaBase || !model) {
+    log(`Vision sidecar skipped: ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL ?? '(unset)'}, OPENCODE_MODEL=${process.env.OPENCODE_MODEL ?? '(unset)'}`);
+    return text;
+  }
+
+  let result = text;
+  for (const match of matches) {
+    const filePath = match[1];
+    if (!ALLOWED_IMAGE_ROOTS.some((r) => filePath.startsWith(r))) continue;
+    const ext = path.extname(filePath).toLowerCase();
+    if (!IMAGE_MIME_BY_EXT[ext]) continue;
+    let buf: Buffer;
+    try {
+      buf = fs.readFileSync(filePath);
+    } catch {
+      continue;
+    }
+
+    const start = Date.now();
+    try {
+      const resp = await fetch(`${ollamaBase}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          messages: [
+            {
+              role: 'user',
+              content:
+                'Describe what is in this image in 2-3 concise sentences. ' +
+                'Include any visible text verbatim. If the image is a screenshot of an app or webpage, name the app/site if recognizable. ' +
+                'Be specific about people, objects, settings, and notable details.',
+              images: [buf.toString('base64')],
+            },
+          ],
+        }),
+      });
+      if (!resp.ok) {
+        log(`Vision sidecar HTTP ${resp.status} for ${filePath}`);
+        continue;
+      }
+      const data = (await resp.json()) as { message?: { content?: string }; error?: string };
+      if (data.error) {
+        log(`Vision sidecar error for ${filePath}: ${data.error}`);
+        continue;
+      }
+      const description = data.message?.content?.trim();
+      if (description) {
+        const elapsedMs = Date.now() - start;
+        const original = match[0];
+        const replacement = `${original}\n[Vision summary (${elapsedMs}ms, ${model}): ${description}]`;
+        result = result.replace(original, replacement);
+        log(`Vision sidecar described ${filePath} in ${elapsedMs}ms: ${description.slice(0, 120).replace(/\n/g, ' ')}…`);
+      }
+    } catch (err) {
+      log(`Vision sidecar exception for ${filePath}: ${(err as Error).message}`);
+    }
+  }
+  return result;
+}
 
 function log(msg: string): void {
   console.error(`[opencode-provider] ${msg}`);
@@ -288,7 +471,8 @@ export class OpenCodeProvider implements AgentProvider {
         if (aborted) return;
         if (pending.length === 0 && ended) return;
 
-        const text = pending.shift()!;
+        const rawText = pending.shift()!;
+        const text = await transcribeImagesInText(rawText);
         let sessionId = self.activeSessionId;
 
         if (!sessionId) {
@@ -306,9 +490,14 @@ export class OpenCodeProvider implements AgentProvider {
           initYielded = true;
         }
 
+        const imageParts = extractImageParts(text);
+        const parts: Array<{ type: 'text'; text: string } | FilePartInput> = [
+          { type: 'text', text },
+          ...imageParts,
+        ];
         const promptRes = await client.session.promptAsync({
           path: { id: sessionId },
-          body: { parts: [{ type: 'text', text }] },
+          body: { parts },
         });
         if (promptRes.error) {
           self.activeSessionId = undefined;
