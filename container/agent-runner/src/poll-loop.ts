@@ -34,12 +34,22 @@ function looksLikeHallucinatedToolCall(text: string): boolean {
   const t = text.trim();
   if (!t) return false;
   // Hard markers the model emits when its tool-call format is broken.
-  const markers = [/<\|?tool_call\|?>/i, /\bcall:[a-z][a-z0-9_]*\s*\{/i, /<\|"\|>/];
+  // Two style families: gemma-style (call:foo{...}<tool_call|>) and
+  // qwen/xml-style (<read><parameter=...>...</tool_call> or </function>).
+  const markers = [
+    /<\|?tool_call\|?>/i,                    // gemma <tool_call|> closer
+    /<\/tool_call>/i,                        // qwen </tool_call> closer
+    /<\/function>/i,                         // qwen/anthropic </function> closer
+    /\bcall:[a-z][a-z0-9_]*\s*\{/i,          // gemma `call:bash{`
+    /<\|"\|>/,                               // gemma <|"|> quote token
+    /<parameter\s*=\s*[a-z_][a-z0-9_]*\s*>/i, // qwen-style <parameter=name>
+    /<parameter\s+name\s*=\s*"[^"]+"\s*>/i,  // anthropic <parameter name="...">
+  ];
   const hasMarker = markers.some((re) => re.test(t));
   if (!hasMarker) return false;
   // Also require the response to be short — long responses with one
   // accidental marker probably contain real content too.
-  return t.length < 400;
+  return t.length < 600;
 }
 
 export interface PollLoopConfig {
