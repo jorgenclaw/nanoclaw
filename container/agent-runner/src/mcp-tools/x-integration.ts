@@ -1,21 +1,23 @@
 /**
  * X-integration MCP tools (container side, NanoClaw v2).
  *
- * 24 tools total, in six families:
+ * 25 tools total, in six families:
  *   - Read (8):    x_read_tweet, x_read_thread, x_read_user,
  *                  x_read_bookmarks, x_read_list, x_read_timeline,
  *                  x_read_notifications, x_search
  *   - Compose (3): x_post, x_reply, x_quote (with media + schedule_at)
- *   - Engage (8): x_like / x_unlike, x_retweet / x_unretweet,
- *                  x_bookmark / x_unbookmark, x_follow / x_unfollow
+ *   - Engage (9): x_like / x_unlike, x_retweet / x_unretweet,
+ *                  x_bookmark / x_unbookmark, x_follow / x_unfollow,
+ *                  x_delete_tweet (text-echo guard, see below)
  *   - Schedule (2): x_list_scheduled, x_cancel_scheduled
  *   - DM (3):     x_read_dm_inbox, x_read_dm_thread, x_send_dm
  *   - Bulk (1):   x_export_bookmarks (resumable CSV dump)
  *
- * NOT included by design: x_delete_tweet. Defense in depth — no MCP tool
- * here, no host handler in src/modules/x-integration/index.ts, no script
- * file. Even an attacker writing a forged {action:'x_delete_tweet'} system
- * row gets dropped by delivery.ts as "Unknown system action".
+ * Safety on x_delete_tweet: tool requires a `text_must_match` substring of
+ * the tweet body. The host script reads the live tweet and refuses to
+ * delete unless the substring is present. Guards against URL hallucinations
+ * and copy-paste errors. No approval gate — consistent with the skill's
+ * stance ("don't gate per action; wrap if you want approvals").
  *
  * Mechanism (mirrors mcp-tools/self-mod.ts): every tool writes a
  * kind:'system' row with content = JSON.stringify({action, requestId,
@@ -458,6 +460,40 @@ export const xUnfollow = makeXTool({
   buildPayload: (args) => ({ handle: args.handle }),
 });
 
+export const xDeleteTweet = makeXTool({
+  name: 'x_delete_tweet',
+  description:
+    'Irreversibly delete one of your own tweets on X. ' +
+    'REQUIRES text_must_match — a distinctive substring (≥5 chars) of the tweet body. ' +
+    'The host script reads the live tweet first and refuses to delete unless the substring is present. ' +
+    'This guards against URL hallucinations and copy-paste errors. ' +
+    'Always read the tweet (x_read_tweet) before calling delete, and pass back a phrase from it as text_must_match.',
+  action: 'x_delete_tweet',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      tweet_url: tweetUrlSchema,
+      text_must_match: {
+        type: 'string',
+        description:
+          'A distinctive substring (≥5 chars) of the tweet body. Safety guard — script will refuse to delete if not present.',
+        minLength: 5,
+      },
+    },
+    required: ['tweet_url', 'text_must_match'],
+  },
+  validate: (args) => {
+    const url = requireTweetUrl(args);
+    if (url) return url;
+    const m = args.text_must_match;
+    if (typeof m !== 'string' || m.trim().length < 5) {
+      return 'text_must_match must be a string of at least 5 non-whitespace characters from the tweet body.';
+    }
+    return null;
+  },
+  buildPayload: (args) => ({ tweetUrl: args.tweet_url, textMustMatch: args.text_must_match }),
+});
+
 // ── Scheduling ──────────────────────────────────────────────
 
 export const xListScheduled = makeXTool({
@@ -565,6 +601,7 @@ registerTools([
   xReadTimeline, xReadNotifications, xSearch,
   xPost, xReply, xQuote,
   xLike, xUnlike, xRetweet, xUnretweet, xBookmark, xUnbookmark, xFollow, xUnfollow,
+  xDeleteTweet,
   xListScheduled, xCancelScheduled,
   xReadDmInbox, xReadDmThread, xSendDm,
   xExportBookmarks,

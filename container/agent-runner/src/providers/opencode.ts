@@ -86,110 +86,6 @@ function extractImageParts(text: string): FilePartInput[] {
   return parts;
 }
 
-/**
- * Vision sidecar — transcribe images inline before opencode sees them.
- *
- * Why a sidecar: opencode-ai 1.4.17 + @ai-sdk/openai-compatible serializes
- * user messages as `content: <string>` (legacy OpenAI format). It silently
- * drops `FilePartInput` parts because the openai-compatible adapter has no
- * multimodal pipeline. Confirmed empirically via proxy capture 2026-05-10.
- *
- * The fix: for each `[Image: /path]` marker in the prompt, call Ollama's
- * native `/api/chat` endpoint (which DOES support the `images` field with
- * base64 bytes), get a 1-3 sentence description, and embed it inline next
- * to the marker. opencode then forwards a text-only message that contains
- * a model-generated vision summary alongside the original path.
- *
- * Tradeoffs:
- *  - +5-30s latency per image (one extra Ollama vision call before main turn)
- *  - The agent answers from a description, not raw pixels — fine for chat
- *    (caption, OCR-lite, identification) but not for fine-grained vision
- *    work. When opencode adds multimodal support upstream, swap back to
- *    inline FilePartInput.
- *  - Requires ANTHROPIC_BASE_URL pointing at an Ollama-OpenAI-compatible
- *    endpoint and OPENCODE_MODEL naming an Ollama model with `vision`
- *    capability. Falls back gracefully (log + skip) on any failure.
- */
-function ollamaNativeUrl(): string | undefined {
-  // ANTHROPIC_BASE_URL is e.g. http://127.0.0.1:11434/v1; native API is at /api/chat.
-  const base = process.env.ANTHROPIC_BASE_URL;
-  if (!base) return undefined;
-  return base.replace(/\/v1\/?$/, '');
-}
-
-function ollamaModelName(): string | undefined {
-  const m = process.env.OPENCODE_MODEL ?? process.env.OPENCODE_SMALL_MODEL;
-  if (!m) return undefined;
-  return m.startsWith('ollama/') ? m.slice('ollama/'.length) : m;
-}
-
-async function transcribeImagesInText(text: string): Promise<string> {
-  const matches = [...text.matchAll(IMAGE_MARKER_RE)];
-  if (matches.length === 0) return text;
-  const ollamaBase = ollamaNativeUrl();
-  const model = ollamaModelName();
-  if (!ollamaBase || !model) {
-    log(`Vision sidecar skipped: ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL ?? '(unset)'}, OPENCODE_MODEL=${process.env.OPENCODE_MODEL ?? '(unset)'}`);
-    return text;
-  }
-
-  let result = text;
-  for (const match of matches) {
-    const filePath = match[1];
-    if (!ALLOWED_IMAGE_ROOTS.some((r) => filePath.startsWith(r))) continue;
-    const ext = path.extname(filePath).toLowerCase();
-    if (!IMAGE_MIME_BY_EXT[ext]) continue;
-    let buf: Buffer;
-    try {
-      buf = fs.readFileSync(filePath);
-    } catch {
-      continue;
-    }
-
-    const start = Date.now();
-    try {
-      const resp = await fetch(`${ollamaBase}/api/chat`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          stream: false,
-          messages: [
-            {
-              role: 'user',
-              content:
-                'Describe what is in this image in 2-3 concise sentences. ' +
-                'Include any visible text verbatim. If the image is a screenshot of an app or webpage, name the app/site if recognizable. ' +
-                'Be specific about people, objects, settings, and notable details.',
-              images: [buf.toString('base64')],
-            },
-          ],
-        }),
-      });
-      if (!resp.ok) {
-        log(`Vision sidecar HTTP ${resp.status} for ${filePath}`);
-        continue;
-      }
-      const data = (await resp.json()) as { message?: { content?: string }; error?: string };
-      if (data.error) {
-        log(`Vision sidecar error for ${filePath}: ${data.error}`);
-        continue;
-      }
-      const description = data.message?.content?.trim();
-      if (description) {
-        const elapsedMs = Date.now() - start;
-        const original = match[0];
-        const replacement = `${original}\n[Vision summary (${elapsedMs}ms, ${model}): ${description}]`;
-        result = result.replace(original, replacement);
-        log(`Vision sidecar described ${filePath} in ${elapsedMs}ms: ${description.slice(0, 120).replace(/\n/g, ' ')}…`);
-      }
-    } catch (err) {
-      log(`Vision sidecar exception for ${filePath}: ${(err as Error).message}`);
-    }
-  }
-  return result;
-}
-
 function log(msg: string): void {
   console.error(`[opencode-provider] ${msg}`);
 }
@@ -313,7 +209,20 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
             ...(modelsToRegister.length > 0
               ? {
                   models: Object.fromEntries(
-                    modelsToRegister.map((mid) => [mid, { id: mid, name: mid, tool_call: true }]),
+                    modelsToRegister.map((mid) => [
+                      mid,
+                      {
+                        id: mid,
+                        name: mid,
+                        tool_call: true,
+                        attachment: true,
+                        // Flips opencode's capabilities.input.image so unsupportedParts()
+                        // stops stripping image content. Verified 2026-05-11 against
+                        // gemma4:26b via @ai-sdk/openai-compatible → Ollama. See
+                        // memory/project_vision_sidecar_2026_05_10.md.
+                        modalities: { input: ['text', 'image'], output: ['text'] },
+                      },
+                    ]),
                   ),
                 }
               : {}),
@@ -471,8 +380,7 @@ export class OpenCodeProvider implements AgentProvider {
         if (aborted) return;
         if (pending.length === 0 && ended) return;
 
-        const rawText = pending.shift()!;
-        const text = await transcribeImagesInText(rawText);
+        const text = pending.shift()!;
         let sessionId = self.activeSessionId;
 
         if (!sessionId) {
