@@ -1,15 +1,15 @@
 ---
 name: x-integration
-description: Full X (Twitter) capability via Playwright + your real Chromium-based browser (Chrome / Brave / Chromium). 24 tools — read tweets/threads/users/bookmarks/lists/timeline/notifications/search, compose with media + native scheduling, like/retweet/bookmark/follow toggles, scheduled-tweet management, DMs, bulk bookmark export to CSV. NanoClaw v2, macOS + Linux. Triggers on "setup x", "x integration", "twitter", "post tweet", "tweet", "dm", "export bookmarks".
+description: Read, post, and engage with X (Twitter) via your real Chromium-based browser. Triggers on "setup x", "x integration", "twitter", "post tweet", "tweet", "dm", "export bookmarks".
 ---
 
 # X (Twitter) Integration
 
-24 MCP tools that automate every common X action through *your real browser* (Chrome, Brave, or Chromium — whichever you have installed). Drives the user's logged-in profile so X's bot detection sees a normal session. Channel-agnostic: works with whatever channel adapter you have wired (Signal, Discord, Slack, etc.).
+MCP tools that automate every common X action through *your real browser* (Chrome, Brave, or Chromium — whichever you have installed). Drives the user's logged-in profile so X's bot detection sees a normal session. Channel-agnostic: works with whatever channel adapter you have wired (Signal, Discord, Slack, etc.).
 
 > **Compatibility:** NanoClaw v2. Cross-platform: macOS and Linux.
 >
-> **What's NOT here, by design:** there is no `x_delete_tweet` tool. Defense in depth — no MCP tool registration, no host handler, no script file. The agent literally cannot delete tweets through this skill.
+> **Delete safety:** `x_delete_tweet` requires the caller to pass a substring of the tweet body as `text_must_match`. The host script reads the live tweet first and refuses to delete unless the substring is present — guards against URL hallucinations and copy-paste mistakes without adding an approval gate.
 
 ## Tool catalog
 
@@ -32,13 +32,14 @@ description: Full X (Twitter) capability via Playwright + your real Chromium-bas
 | `x_reply` | `tweet_url`, `content`, `media?[]`, `schedule_at?` | Reply to a tweet. Same media + schedule support. |
 | `x_quote` | `tweet_url`, `comment`, `media?[]`, `schedule_at?` | Quote-tweet with a comment. Same media + schedule support. |
 
-### Engagement (8) — toggles
+### Engagement (9) — toggles + delete
 | Tool | Args |
 |------|------|
 | `x_like` / `x_unlike` | `tweet_url` |
 | `x_retweet` / `x_unretweet` | `tweet_url` |
 | `x_bookmark` / `x_unbookmark` | `tweet_url` |
 | `x_follow` / `x_unfollow` | `handle` |
+| `x_delete_tweet` | `tweet_url`, `text_must_match` (≥5-char substring of tweet body — safety guard) |
 
 ### Scheduling queue (2)
 | Tool | Args | What it does |
@@ -271,6 +272,7 @@ DMs are sensitive. Three protections shipped:
     ├── unbookmark.ts         # x_unbookmark
     ├── follow.ts             # x_follow
     ├── unfollow.ts           # x_unfollow
+    ├── delete-tweet.ts       # x_delete_tweet (text-echo safety guard)
     ├── list-scheduled.ts     # x_list_scheduled
     ├── cancel-scheduled.ts   # x_cancel_scheduled
     ├── read-dm-inbox.ts      # x_read_dm_inbox
@@ -281,7 +283,7 @@ DMs are sensitive. Three protections shipped:
 ## Security
 
 - `data/x-browser-profile/` and `data/x-auth.json` are gitignored — session cookies never enter version control.
-- `x_delete_tweet` does not exist. No MCP tool, no host handler, no script. Three-layer defense.
+- `x_delete_tweet` is the only irreversible action with a built-in safety guard: the caller must pass a substring of the tweet body as `text_must_match`, and the host script reads the live tweet to verify the substring is present before clicking delete. This catches URL hallucinations and copy-paste mistakes without adding an approval round-trip.
 - DM bodies are redacted from `nanoclaw.log`.
-- Posting / liking / following are not approval-gated. If you want admin approval gating per action, model it as a separate skill that wraps these tools — don't add an approval flag here.
+- Posting / liking / following / deleting are not approval-gated. If you want admin approval gating per action, model it as a separate skill that wraps these tools — don't add an approval flag here.
 - The MCP tools ship via the runner once installed, so all agent groups see them. Finer-grained per-group gating is a future addition.

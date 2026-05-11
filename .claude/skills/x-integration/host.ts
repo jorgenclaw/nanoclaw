@@ -285,6 +285,17 @@ registerDeliveryAction('x_unfollow', makeXHandler({
   buildArgs: (c) => ({ handle: c.handle }),
 }));
 
+// Delete tweet — irreversibly removes one of the user's own tweets.
+// The script enforces a text-echo safety guard (tweetUrl + textMustMatch);
+// host handler just passes both fields through. No approval gate — consistent
+// with the skill's per-action trust model. See scripts/delete-tweet.ts for
+// the safety logic.
+registerDeliveryAction('x_delete_tweet', makeXHandler({
+  action: 'x_delete_tweet', scriptName: 'delete-tweet',
+  required: ['tweetUrl', 'textMustMatch'],
+  buildArgs: (c) => ({ tweetUrl: c.tweetUrl, textMustMatch: c.textMustMatch }),
+}));
+
 // Scheduling
 registerDeliveryAction('x_list_scheduled', makeXHandler({
   action: 'x_list_scheduled', scriptName: 'list-scheduled',

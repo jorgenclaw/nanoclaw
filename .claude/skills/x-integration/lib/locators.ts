@@ -3,7 +3,7 @@
  *
  * Every CSS / data-testid selector used by any script in this skill lives
  * here. When X redeploys and a selector breaks, this is the one place to
- * update — the change propagates to all 23 tools.
+ * update — the change propagates to all 25 tools.
  *
  * Selector confidence:
  *   - HIGH: composer textarea, tweet card, like/retweet/bookmark/reply
@@ -108,6 +108,12 @@ export const X_SELECTORS = {
   // ─── Image alt-text on tweet media ────────────────────────
   /** Image inside tweet card. alt attribute carries alt-text or "Image". */
   tweetImage: 'img[draggable="true"][alt]',
+
+  // ─── Tweet caret menu (used by delete-tweet) ──────────────
+  /** Three-dot caret button on a tweet card that opens the action menu. */
+  caret: '[data-testid="caret"]',
+  /** Dropdown menu items in the caret-opened action menu. Filter by inner text in the script. */
+  dropdownMenuItem: '[data-testid="Dropdown"] [role="menuitem"]',
 };
 
 /**
