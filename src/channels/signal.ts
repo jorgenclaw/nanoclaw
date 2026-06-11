@@ -46,6 +46,7 @@ interface SignalMention {
 interface SignalEnvelope {
   source?: string;
   sourceNumber?: string;
+  sourceUuid?: string;
   sourceName?: string;
   timestamp?: number;
   dataMessage?: {
@@ -331,7 +332,11 @@ function createSignalAdapter(): ChannelAdapter | null {
     const imageAttachments = dataMsg.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
     if (!dataMsg.message && !audioAttachment && imageAttachments.length === 0) return;
 
-    const senderId = envelope.source || envelope.sourceNumber || '';
+    // Prefer the stable ACI (sourceUuid) as the routing key. signal-cli 0.14.x
+    // began populating `source`/`sourceNumber` with the phone number even for
+    // contacts with phone-number privacy on; earlier versions put the UUID in
+    // `source`. Messaging groups are registered under the UUID, so key on it.
+    const senderId = envelope.sourceUuid || envelope.source || envelope.sourceNumber || '';
     const senderPhone = envelope.sourceNumber || envelope.source || '';
     const senderName = envelope.sourceName || senderPhone;
 
