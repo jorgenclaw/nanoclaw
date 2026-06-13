@@ -82,6 +82,45 @@ export function resolveOneCLIApproval(approvalId: string, selectedOption: string
   return true;
 }
 
+// --- Passport gateway-enforcement: shadow-mode observation (2026-06-13) ---
+//
+// OBSERVE-ONLY. Logs the shape of each ApprovalRequest the gateway hands us —
+// most importantly *which request headers the OneCLI proxy forwards* — to confirm
+// we can later carry an `X-NanoClaw-Action-Id` token through the proxy for exact,
+// per-action correlation (the Option-B Tier-2 fail-closed backstop). This changes
+// NO approval decision: it runs before handleRequest and its return value is ignored.
+//
+// Sensitive header values are redacted to a length tag; we only need the key set to
+// prove pass-through, and the host must never log raw credentials.
+const SENSITIVE_HEADER =
+  /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token|x-amz-security-token|x-amz-credential|x-amz-date|nwc|x-nwc|x-goog-api-key)$/i;
+
+function redactHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers ?? {})) {
+    out[k] = SENSITIVE_HEADER.test(k) ? `<redacted:${(v ?? '').length}b>` : v;
+  }
+  return out;
+}
+
+function logShadowObservation(request: ApprovalRequest): void {
+  try {
+    const headers = request.headers ?? {};
+    log.info('[passport-shadow] onecli approval observed', {
+      oneCliRequestId: request.id,
+      method: request.method,
+      host: request.host,
+      path: request.path,
+      headerKeys: Object.keys(headers),
+      headers: redactHeaders(headers),
+      agentExternalId: request.agent.externalId,
+      agentName: request.agent.name,
+    });
+  } catch (err) {
+    log.warn('[passport-shadow] observation log failed', { err });
+  }
+}
+
 export function startOneCLIApprovalHandler(deliveryAdapter: ChannelDeliveryAdapter): void {
   if (handle) return;
   adapterRef = deliveryAdapter;
@@ -90,6 +129,7 @@ export function startOneCLIApprovalHandler(deliveryAdapter: ChannelDeliveryAdapt
   sweepStaleApprovals().catch((err) => log.error('OneCLI approval sweep failed', { err }));
 
   handle = onecli.configureManualApproval(async (request: ApprovalRequest): Promise<Decision> => {
+    logShadowObservation(request); // observe-only; does not affect the decision
     try {
       return await handleRequest(request);
     } catch (err) {
