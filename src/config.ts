@@ -11,6 +11,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'ONECLI_API_KEY',
+  'ONECLI_GATEWAY_URL',
   'TZ',
   'SIGNAL_PHONE_NUMBER',
   'SIGNAL_CLI_TCP_HOST',
@@ -62,6 +63,23 @@ export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
+// The OneCLI SDK auto-resolves the gateway via GET /api/gateway-url, which returns
+// "http://localhost:10255". That bind is unreachable from the host process — the proxy listens only
+// on the docker-bridge IP (172.17.0.1:10255), so the approval long-poll silently connection-refuses
+// forever and manual-approval never fires. We override with the same host we already reach the OneCLI
+// control plane on, port 10255. Override explicitly via ONECLI_GATEWAY_URL if the gateway moves.
+function deriveGatewayUrl(controlUrl: string | undefined): string | undefined {
+  if (!controlUrl) return undefined;
+  try {
+    const u = new URL(controlUrl);
+    u.port = '10255';
+    return u.origin;
+  } catch {
+    return undefined;
+  }
+}
+export const ONECLI_GATEWAY_URL =
+  process.env.ONECLI_GATEWAY_URL || envConfig.ONECLI_GATEWAY_URL || deriveGatewayUrl(ONECLI_URL);
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);

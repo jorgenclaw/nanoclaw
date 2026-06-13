@@ -20,7 +20,7 @@
 import { OneCLI, type ApprovalRequest, type ManualApprovalHandle } from '@onecli-sh/sdk';
 
 import { pickApprovalDelivery, pickApprover } from './primitive.js';
-import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
+import { ONECLI_API_KEY, ONECLI_GATEWAY_URL, ONECLI_URL } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   createPendingApproval,
@@ -36,7 +36,14 @@ export const ONECLI_ACTION = 'onecli_credential';
 
 type Decision = 'approve' | 'deny';
 
-const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+// Pass gatewayUrl explicitly: the SDK's auto-resolve returns an unreachable localhost address (see
+// ONECLI_GATEWAY_URL in config.ts). With it preset, the approval poller skips resolution and long-polls
+// the host-reachable proxy, so manual-approval callbacks actually fire.
+const onecli = new OneCLI({
+  url: ONECLI_URL,
+  apiKey: ONECLI_API_KEY,
+  ...(ONECLI_GATEWAY_URL ? { gatewayUrl: ONECLI_GATEWAY_URL } : {}),
+});
 
 interface PendingState {
   resolve: (decision: Decision) => void;
