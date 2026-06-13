@@ -9,31 +9,46 @@ import {
   type VerifyDeps,
   type ResponseEnvelope,
   type PendingRequest,
-} from "./verify.js";
-import { ActionStore, type ActionInput } from "./store.js";
+  type NonceStore,
+} from './verify.js';
+import { ActionStore, type ActionInput } from './store.js';
+import type { AuthRequest } from './canonical.js';
 
-export { ActionStore } from "./store.js";
-export type { ActionInput } from "./store.js";
-export { StandInPassport } from "./signer.js";
-export type { SignArgs } from "./signer.js";
-export { verifyAuthorization } from "./verify.js";
-export type { Verdict, ResponseEnvelope, PendingRequest, NonceStore, VerifyDeps } from "./verify.js";
-export * from "./canonical.js";
+export { ActionStore } from './store.js';
+export type { ActionInput } from './store.js';
+export { SqliteActionStore } from './durable-store.js';
+export { StandInPassport } from './signer.js';
+export type { SignArgs } from './signer.js';
+export { verifyAuthorization } from './verify.js';
+export type { Verdict, ResponseEnvelope, PendingRequest, NonceStore, VerifyDeps } from './verify.js';
+export * from './canonical.js';
 
 /** Anything that turns an issued request into a signed envelope (the Passport, stand-in or real). */
-export type Responder = (
-  args: { request_id: string; request_hash: Buffer },
-) => ResponseEnvelope | Promise<ResponseEnvelope>;
+export type Responder = (args: {
+  request_id: string;
+  request_hash: Buffer;
+}) => ResponseEnvelope | Promise<ResponseEnvelope>;
+
+/**
+ * What the gateway needs from a store, structurally — satisfied by both ActionStore (in-memory) and
+ * SqliteActionStore (durable). An interface (not the concrete class) so either is assignable; the
+ * concrete classes carry private fields that would otherwise make them nominally incompatible.
+ */
+export interface PassportStore extends NonceStore {
+  issue(input: ActionInput): AuthRequest;
+  recompute(p: PendingRequest): Buffer;
+  now_ms(): bigint;
+}
 
 export interface GatewayOptions {
   /** TOFU-pinned 33-byte compressed device pubkey, established once at pairing. */
   pinnedPubkey: Buffer;
   now_ms?: () => bigint;
-  store?: ActionStore;
+  store?: PassportStore;
 }
 
 export class PassportGateway {
-  readonly store: ActionStore;
+  readonly store: PassportStore;
   private readonly pinned: Buffer;
   private readonly clock: () => bigint;
 
