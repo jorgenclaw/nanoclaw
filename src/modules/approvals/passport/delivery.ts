@@ -21,15 +21,28 @@ import type { AuthorizationService } from './authorization-service.js';
 import { getAuthorizationService } from './service-host.js';
 import { paramsFromWire, type ParamsWire } from './wire.js';
 import type { EgressBinding } from './egress-store.js';
+import type { Params } from './canonical.js';
 
 export const PASSPORT_AUTHORIZE_ACTION = 'passport_authorize';
 
-interface EgressWire {
-  method: string;
-  host: string;
-  path: string;
-  /** Hex SHA-256 of the full request body, if the tool has it. */
-  bodySha256?: string;
+/**
+ * Derive the egress binding from the SIGNED params, not a separate field. The frozen canonical contract
+ * can't grow fields, so an Option-A HTTP action carries its wire identity as params: `method`/`host`/
+ * `path` (str), plus `body_sha256` (bytes) for the body. Because these live in `params`, they are inside
+ * the request_hash the Passport signs. No method/host/path → not a valid Option-A request → caller denies.
+ *
+ * The token binds method+host+path ONLY — deliberately NOT the body. The OneCLI gateway hands Tier 2 a
+ * *truncated* bodyPreview, so Tier 2 cannot reliably recompute a full-body hash; a body-bound token would
+ * be unredeemable for any non-trivial body. The body's integrity instead rides on the Passport signature
+ * over params.body_sha256 (Tier 1). Body-bound tokens stay available for host-executed actions (Option B)
+ * where the host sees the full bytes — that's why EgressTokenStore still supports bodySha256.
+ */
+function egressFromParams(params: Params): EgressBinding | null {
+  const method = params.method?.t === 'str' ? params.method.v : undefined;
+  const host = params.host?.t === 'str' ? params.host.v : undefined;
+  const path = params.path?.t === 'str' ? params.path.v : undefined;
+  if (!method || !host || !path) return null;
+  return { method, host, path };
 }
 
 /** Write the verdict into inbound.db so the blocked tool poll resolves. trigger=0: don't wake the agent. */
@@ -65,17 +78,12 @@ export async function handlePassportAuthorize(
   }
 
   try {
-    const egressWire = content.egress as EgressWire | undefined;
-    if (!egressWire?.method || !egressWire.host || !egressWire.path) {
-      writeVerdict(inDb, actionId, false, 'malformed egress binding');
+    const params = paramsFromWire((content.params as ParamsWire) ?? {});
+    const egress = egressFromParams(params);
+    if (!egress) {
+      writeVerdict(inDb, actionId, false, 'params missing method/host/path egress binding');
       return;
     }
-    const egress: EgressBinding = {
-      method: egressWire.method,
-      host: egressWire.host,
-      path: egressWire.path,
-      ...(egressWire.bodySha256 ? { bodySha256: Buffer.from(egressWire.bodySha256, 'hex') } : {}),
-    };
 
     const result = await service.authorize({
       actionId,
@@ -83,7 +91,7 @@ export async function handlePassportAuthorize(
       agentId: session.agent_group_id,
       action: String(content.canonicalAction ?? ''),
       risk: Number(content.risk ?? 0),
-      params: paramsFromWire((content.params as ParamsWire) ?? {}),
+      params,
       display: String(content.display ?? ''),
       egress,
       ...(typeof content.ttlMs === 'number' ? { ttlMs: content.ttlMs } : {}),

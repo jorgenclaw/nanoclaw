@@ -49,23 +49,22 @@ const SESSION: Session = {
 
 const BODY = JSON.stringify({ amount_sats: 5000, destination: 'scott@jorgenclaw.ai' });
 
+// Option-A convention: the wire identity (method/host/path/body_sha256) lives INSIDE params, so the
+// Passport's signature covers it and the host derives the egress binding from signed data.
 function content(actionId = 'act-1', extra: Record<string, unknown> = {}) {
   return {
     action: 'passport_authorize',
     actionId,
-    canonicalAction: 'lightning_payment',
+    canonicalAction: 'github_write',
     risk: 3,
     params: paramsToWire({
-      amount_sats: { t: 'u64', v: 5000n },
-      destination: { t: 'str', v: 'scott@jorgenclaw.ai' },
+      method: { t: 'str', v: 'POST' },
+      host: { t: 'str', v: 'api.github.com' },
+      path: { t: 'str', v: '/repos/jorgenclaw/test/issues' },
+      body_sha256: { t: 'bytes', v: bodySha256(BODY) },
+      summary: { t: 'str', v: 'Create issue "hello"' },
     }),
-    display: 'Pay 5,000 sats to scott@jorgenclaw.ai',
-    egress: {
-      method: 'POST',
-      host: 'api.lightning.example',
-      path: '/v1/pay',
-      bodySha256: bodySha256(BODY).toString('hex'),
-    },
+    display: 'GitHub POST /repos/jorgenclaw/test/issues — create issue "hello"',
     ...extra,
   };
 }
@@ -91,13 +90,23 @@ describe('handlePassportAuthorize', () => {
     expect(verdict.authorized).toBe(true);
     expect(verdict.trigger).toBe(0); // inline response, must not wake the agent
 
-    // The minted egress token releases exactly the bound call (Tier-2 redeem).
+    // A call to a DIFFERENT endpoint with the token is denied (binding holds) — and a mismatch is
+    // non-consuming, so the honest call below still releases.
+    const wrong = svc.redeem({
+      actionId: 'act-1',
+      method: 'POST',
+      host: 'api.github.com',
+      path: '/repos/evil/x/issues',
+    });
+    expect(wrong.release).toBe(false);
+
+    // The minted egress token releases on method+host+path alone — the real Tier-2 gateway only sees a
+    // truncated bodyPreview and can't supply a full-body hash, so the token must not require one.
     const release = svc.redeem({
       actionId: 'act-1',
       method: 'POST',
-      host: 'api.lightning.example',
-      path: '/v1/pay',
-      bodySha256: bodySha256(BODY),
+      host: 'api.github.com',
+      path: '/repos/jorgenclaw/test/issues',
     });
     expect(release.release).toBe(true);
     dbHost.close();
@@ -127,22 +136,33 @@ describe('handlePassportAuthorize', () => {
     expect(verdict.authorized).toBe(false);
     expect(verdict.reason).toMatch(/denied/i);
     expect(
-      svc.redeem({ actionId: 'act-deny', method: 'POST', host: 'api.lightning.example', path: '/v1/pay' }).release,
+      svc.redeem({
+        actionId: 'act-deny',
+        method: 'POST',
+        host: 'api.github.com',
+        path: '/repos/jorgenclaw/test/issues',
+      }).release,
     ).toBe(false);
     dbHost.close();
     inDb.close();
   });
 
-  it('malformed egress binding fails closed with a written denial (does not hang)', async () => {
+  it('params missing the wire binding fails closed with a written denial (does not hang)', async () => {
     const dbHost = new Database(':memory:');
     const inDb = inboundDb();
     const svc = service(dbHost);
 
-    await handlePassportAuthorize(content('act-bad', { egress: { host: 'x' } }), SESSION, inDb, svc);
+    // params without method/host/path — not a valid Option-A request.
+    await handlePassportAuthorize(
+      { action: 'passport_authorize', actionId: 'act-bad', params: paramsToWire({ summary: { t: 'str', v: 'x' } }) },
+      SESSION,
+      inDb,
+      svc,
+    );
 
     const verdict = readVerdict(inDb, 'act-bad');
     expect(verdict.authorized).toBe(false);
-    expect(verdict.reason).toMatch(/malformed/i);
+    expect(verdict.reason).toMatch(/missing method\/host\/path/i);
     dbHost.close();
     inDb.close();
   });
