@@ -20,6 +20,12 @@ import type { RedeemResult } from './egress-store.js';
 
 const ACTION_ID_HEADER = 'x-nanoclaw-action-id';
 
+// Tier-2 gates MUTATING calls only. Reads (GET/HEAD/OPTIONS) to a gated host pass through untouched —
+// the credential they use is fine; the gate is for high-stakes *actions* (the WYSIWYS approval surface),
+// and the typed tool (github_write) only ever issues these methods. Without this, a manual_approval rule
+// that matches all methods would deny the agent's normal GitHub reads under enforcement.
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 export interface Tier2Request {
   id?: string;
   method: string;
@@ -62,6 +68,10 @@ function findActionId(headers?: Record<string, string>): string | undefined {
 
 export function decidePassportTier2(req: Tier2Request, redeemer: Tier2Redeemer, mode: Tier2Mode): Tier2Outcome {
   try {
+    // Reads are never gated — only mutating methods can be high-stakes actions.
+    if (!WRITE_METHODS.has(req.method.toUpperCase())) {
+      return { decision: null, shadow: false, reason: 'non-mutating method — not gated' };
+    }
     const host = normalizeHost(req.host);
     const actionId = findActionId(req.headers);
     const isGated = mode.gatedHosts.includes(host);

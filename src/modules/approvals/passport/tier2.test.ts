@@ -97,12 +97,24 @@ describe('decidePassportTier2', () => {
     expect(out.shadow).toBe(false);
   });
 
-  it('a call to a non-gated host with no token is not Tier-2 business (falls through)', async () => {
+  it('a WRITE to a non-gated host with no token is not Tier-2 business (falls through)', async () => {
     const svc = service();
-    const out = decidePassportTier2({ id: 'r', method: 'GET', host: 'wttr.in', path: '/', headers: {} }, svc, ENFORCE);
+    const out = decidePassportTier2({ id: 'r', method: 'POST', host: 'wttr.in', path: '/', headers: {} }, svc, ENFORCE);
     expect(out.decision).toBe(null);
     expect(out.shadow).toBe(false);
     expect(out.reason).toMatch(/not a passport-gated call/i);
+  });
+
+  it('a READ (GET) to a gated host is NEVER gated — reads pass even under enforce', () => {
+    const svc = service();
+    const out = decidePassportTier2(
+      { id: 'g', method: 'GET', host: 'api.github.com:443', path: '/repos/x/y/issues?state=all', headers: {} },
+      svc,
+      ENFORCE,
+    );
+    expect(out.decision).toBe(null);
+    expect(out.shadow).toBe(false);
+    expect(out.reason).toMatch(/non-mutating/i);
   });
 
   it('a token bound to one endpoint will not release a different endpoint (binding holds)', async () => {
