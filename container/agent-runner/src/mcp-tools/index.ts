@@ -18,6 +18,7 @@ import './web-search.js';
 import './report-failure.js';
 import './x-integration.js';
 import './github-write.js';
+import './lightning-pay.js';
 import { startMcpServer } from './server.js';
 
 function log(msg: string): void {

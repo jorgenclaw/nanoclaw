@@ -57,6 +57,18 @@ export type AuthorizeResult =
   | { authorized: true; actionId: string; reason: string; verdict: Verdict }
   | { authorized: false; actionId: string; reason: string; verdict: Verdict | null };
 
+/** Like AuthorizeRequest but with NO egress binding — for host-executed actions (Option B) that have no
+ *  network chokepoint to redeem a token against. The authorization itself is the gate. */
+export interface AuthorizeLocalRequest {
+  actionId: string;
+  agentId: string;
+  action: string;
+  risk: number;
+  params: Params;
+  display: string;
+  ttlMs?: number;
+}
+
 export interface AuthorizationServiceOptions {
   gateway: PassportGateway;
   egress: EgressTokenStore;
@@ -115,6 +127,41 @@ export class AuthorizationService {
         authorized: false,
         actionId: req.actionId,
         reason: 'authorize exception → fail-closed: ' + (e instanceof Error ? e.message : String(e)),
+        verdict: null,
+      };
+    }
+  }
+
+  /**
+   * Tier 1 for HOST-EXECUTED actions (Option B — e.g. a Lightning payment). Runs the SAME issue → sign →
+   * verify handshake as authorize(), but mints NO egress token: there is no OneCLI gateway in the path to
+   * redeem one against, because the host executes the action itself with a credential the container never
+   * holds. The verified APPROVE *is* the authorization. Fail-closed: any failure returns authorized:false.
+   */
+  async authorizeLocal(req: AuthorizeLocalRequest): Promise<AuthorizeResult> {
+    try {
+      const verdict = await this.gateway.authorize(
+        {
+          request_id: req.actionId,
+          agent_id: req.agentId,
+          action: req.action,
+          risk: req.risk,
+          params: req.params,
+          display: req.display,
+          ttl_ms: req.ttlMs,
+        },
+        this.responder,
+      );
+
+      if (!verdict.release) {
+        return { authorized: false, actionId: req.actionId, reason: verdict.reason, verdict };
+      }
+      return { authorized: true, actionId: req.actionId, reason: verdict.reason, verdict };
+    } catch (e) {
+      return {
+        authorized: false,
+        actionId: req.actionId,
+        reason: 'authorizeLocal exception → fail-closed: ' + (e instanceof Error ? e.message : String(e)),
         verdict: null,
       };
     }

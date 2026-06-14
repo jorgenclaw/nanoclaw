@@ -23,6 +23,9 @@ import { startOneCLIApprovalHandler, stopOneCLIApprovalHandler } from './onecli-
 // Tier-1 passport gate: registers the `passport_authorize` delivery action (host half of the
 // container↔host authorize round trip). Side-effect import.
 import './passport/delivery.js';
+// Option B (host-executed) gate: registers the `lightning_pay` delivery action — host authorizes AND
+// executes the payment with the host-held NWC credential. Side-effect import.
+import './passport/lightning.js';
 
 // Public API re-exports so consumers import from the module root.
 export { requestApproval, registerApprovalHandler, notifyAgent } from './primitive.js';
