@@ -20,7 +20,15 @@
 import { OneCLI, type ApprovalRequest, type ManualApprovalHandle } from '@onecli-sh/sdk';
 
 import { pickApprovalDelivery, pickApprover } from './primitive.js';
-import { ONECLI_API_KEY, ONECLI_GATEWAY_URL, ONECLI_URL } from '../../config.js';
+import { decidePassportTier2 } from './passport/tier2.js';
+import { getAuthorizationService } from './passport/service-host.js';
+import {
+  ONECLI_API_KEY,
+  ONECLI_GATEWAY_URL,
+  ONECLI_URL,
+  PASSPORT_GATED_HOSTS,
+  PASSPORT_TIER2_ENFORCE,
+} from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   createPendingApproval,
@@ -137,6 +145,28 @@ export function startOneCLIApprovalHandler(deliveryAdapter: ChannelDeliveryAdapt
 
   handle = onecli.configureManualApproval(async (request: ApprovalRequest): Promise<Decision> => {
     logShadowObservation(request); // observe-only; does not affect the decision
+
+    // Tier-2 backstop: redeem the Passport egress token. A valid token releases instantly (no card);
+    // a gated-host call without one is denied (enforce) or logged-only (shadow). See passport/tier2.ts.
+    const t2 = decidePassportTier2(request, getAuthorizationService(), {
+      enforce: PASSPORT_TIER2_ENFORCE,
+      gatedHosts: PASSPORT_GATED_HOSTS,
+    });
+    if (t2.decision) {
+      const fields = { id: request.id, host: request.host, path: request.path, reason: t2.reason };
+      if (t2.decision === 'deny') log.warn('[passport-tier2] DENY', fields);
+      else log.info('[passport-tier2] release', fields);
+      return t2.decision;
+    }
+    if (t2.shadow) {
+      log.warn('[passport-tier2] SHADOW (not enforced)', {
+        id: request.id,
+        host: request.host,
+        path: request.path,
+        reason: t2.reason,
+      });
+    }
+
     try {
       return await handleRequest(request);
     } catch (err) {

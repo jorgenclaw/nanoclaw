@@ -12,6 +12,8 @@ const envConfig = readEnvFile([
   'ONECLI_URL',
   'ONECLI_API_KEY',
   'ONECLI_GATEWAY_URL',
+  'PASSPORT_TIER2_ENFORCE',
+  'PASSPORT_GATED_HOSTS',
   'TZ',
   'SIGNAL_PHONE_NUMBER',
   'SIGNAL_CLI_TCP_HOST',
@@ -80,6 +82,19 @@ function deriveGatewayUrl(controlUrl: string | undefined): string | undefined {
 }
 export const ONECLI_GATEWAY_URL =
   process.env.ONECLI_GATEWAY_URL || envConfig.ONECLI_GATEWAY_URL || deriveGatewayUrl(ONECLI_URL);
+
+// Passport Tier-2 backstop (see src/modules/approvals/passport/). Default OFF = shadow mode: log what
+// the gate WOULD decide, deny nothing. Flip to 'true' only after the shadow logs look right — that's
+// when a credentialed call to a gated host without a redeemable token actually gets denied.
+export const PASSPORT_TIER2_ENFORCE =
+  (process.env.PASSPORT_TIER2_ENFORCE || envConfig.PASSPORT_TIER2_ENFORCE) === 'true';
+// Comma-separated hosts that REQUIRE a valid Passport action-id token (e.g. 'api.github.com'). A held
+// call to one of these with no/invalid token is the deny target under enforcement. Empty = no host is
+// token-required (Tier-2 still handles any token-bearing call, but denies nothing on absence).
+export const PASSPORT_GATED_HOSTS = (process.env.PASSPORT_GATED_HOSTS || envConfig.PASSPORT_GATED_HOSTS || '')
+  .split(',')
+  .map((h) => h.trim().toLowerCase())
+  .filter(Boolean);
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
