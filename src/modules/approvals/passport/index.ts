@@ -21,6 +21,10 @@ export { StandInPassport } from './signer.js';
 export type { SignArgs } from './signer.js';
 export { verifyAuthorization } from './verify.js';
 export type { Verdict, ResponseEnvelope, PendingRequest, NonceStore, VerifyDeps } from './verify.js';
+export { EgressTokenStore } from './egress-store.js';
+export type { EgressBinding, MintInput, RedeemClaim, RedeemResult } from './egress-store.js';
+export { AuthorizationService, autoApproveResponder, autoDenyResponder, bodySha256 } from './authorization-service.js';
+export type { AuthorizeRequest, AuthorizeResult, AuthorizationServiceOptions } from './authorization-service.js';
 export * from './canonical.js';
 
 /** Anything that turns an issued request into a signed envelope (the Passport, stand-in or real). */
