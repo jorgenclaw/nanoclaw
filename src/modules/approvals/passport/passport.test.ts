@@ -1,7 +1,7 @@
 // Offline gateway round trip + attack matrix, exercised through the StandInPassport.
 // Every non-(valid, fresh, pinned, approve) path must fail closed (release:false).
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from 'vitest';
 import {
   PassportGateway,
   StandInPassport,
@@ -9,52 +9,48 @@ import {
   verifyAuthorization,
   DECISION,
   type ActionInput,
-} from "./index.js";
+} from './index.js';
 
 const passport = new StandInPassport(); // the pinned device for all tests
 
-function sampleAction(request_id = "req-rt-1"): ActionInput {
+function sampleAction(request_id = 'req-rt-1'): ActionInput {
   return {
     request_id,
-    agent_id: "jorgenclaw",
-    action: "lightning_payment",
+    agent_id: 'jorgenclaw',
+    action: 'lightning_payment',
     risk: 3,
     params: {
-      amount_sats: { t: "u64", v: 5000n },
-      destination: { t: "str", v: "scott@jorgenclaw.ai" },
+      amount_sats: { t: 'u64', v: 5000n },
+      destination: { t: 'str', v: 'scott@jorgenclaw.ai' },
     },
-    display: "Pay 5,000 sats to scott@jorgenclaw.ai",
+    display: 'Pay 5,000 sats to scott@jorgenclaw.ai',
   };
 }
 
-describe("PassportGateway — happy path", () => {
-  it("releases on a valid, fresh, pinned-signer approval", async () => {
+describe('PassportGateway — happy path', () => {
+  it('releases on a valid, fresh, pinned-signer approval', async () => {
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey });
-    const v = await gw.authorize(sampleAction(), (a) =>
-      passport.respond({ ...a, decision: DECISION.approve }),
-    );
+    const v = await gw.authorize(sampleAction(), (a) => passport.respond({ ...a, decision: DECISION.approve }));
     expect(v).toEqual({
       release: true,
-      decision: "approve",
-      reason: "valid, fresh, pinned-signer approval",
+      decision: 'approve',
+      reason: 'valid, fresh, pinned-signer approval',
     });
   });
 
-  it("does NOT release on a signed denial", async () => {
+  it('does NOT release on a signed denial', async () => {
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey });
-    const v = await gw.authorize(sampleAction("req-deny"), (a) =>
-      passport.respond({ ...a, decision: DECISION.deny }),
-    );
+    const v = await gw.authorize(sampleAction('req-deny'), (a) => passport.respond({ ...a, decision: DECISION.deny }));
     expect(v.release).toBe(false);
-    expect(v.decision).toBe("deny");
+    expect(v.decision).toBe('deny');
     expect(v.reason).toMatch(/denied/i);
   });
 });
 
-describe("PassportGateway — attack matrix (all fail closed)", () => {
-  it("replay: a consumed approval cannot be reused", () => {
+describe('PassportGateway — attack matrix (all fail closed)', () => {
+  it('replay: a consumed approval cannot be reused', () => {
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey });
-    const req = gw.store.issue(sampleAction("req-replay"));
+    const req = gw.store.issue(sampleAction('req-replay'));
     const env = passport.respond({
       request_id: req.request_id,
       request_hash: gw.store.get(req.request_id)!.expected_request_hash,
@@ -66,10 +62,10 @@ describe("PassportGateway — attack matrix (all fail closed)", () => {
     expect(second.reason).toMatch(/issued|consumed|replay/i);
   });
 
-  it("expired: past the hard deadline → deny", () => {
+  it('expired: past the hard deadline → deny', () => {
     let now = 1_000_000n;
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey, now_ms: () => now });
-    const req = gw.store.issue({ ...sampleAction("req-exp"), ttl_ms: 1000 });
+    const req = gw.store.issue({ ...sampleAction('req-exp'), ttl_ms: 1000 });
     const env = passport.respond({
       request_id: req.request_id,
       request_hash: gw.store.get(req.request_id)!.expected_request_hash,
@@ -81,19 +77,19 @@ describe("PassportGateway — attack matrix (all fail closed)", () => {
     expect(v.reason).toMatch(/expired/i);
   });
 
-  it("unpinned signer: a different device is rejected", async () => {
-    const other = new StandInPassport("a-different-device");
+  it('unpinned signer: a different device is rejected', async () => {
+    const other = new StandInPassport('a-different-device');
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey });
-    const v = await gw.authorize(sampleAction("req-unpinned"), (a) =>
+    const v = await gw.authorize(sampleAction('req-unpinned'), (a) =>
       other.respond({ ...a, decision: DECISION.approve }),
     );
     expect(v.release).toBe(false);
     expect(v.reason).toMatch(/pinned/i);
   });
 
-  it("WYSIWYS mismatch: signing a different request_hash than was issued", () => {
+  it('WYSIWYS mismatch: signing a different request_hash than was issued', () => {
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey });
-    const req = gw.store.issue(sampleAction("req-wysiwys"));
+    const req = gw.store.issue(sampleAction('req-wysiwys'));
     const bogus = Buffer.alloc(32, 0xab);
     const env = passport.respond({
       request_id: req.request_id,
@@ -105,9 +101,9 @@ describe("PassportGateway — attack matrix (all fail closed)", () => {
     expect(v.reason).toMatch(/WYSIWYS|signed action/i);
   });
 
-  it("tampered signature: a flipped byte fails verification", () => {
+  it('tampered signature: a flipped byte fails verification', () => {
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey });
-    const req = gw.store.issue(sampleAction("req-sig"));
+    const req = gw.store.issue(sampleAction('req-sig'));
     const env = passport.respond({
       request_id: req.request_id,
       request_hash: gw.store.get(req.request_id)!.expected_request_hash,
@@ -119,10 +115,10 @@ describe("PassportGateway — attack matrix (all fail closed)", () => {
     expect(v.reason).toMatch(/signature/i);
   });
 
-  it("unknown request_id: nothing was issued for it", () => {
+  it('unknown request_id: nothing was issued for it', () => {
     const gw = new PassportGateway({ pinnedPubkey: passport.pubkey });
     const env = passport.respond({
-      request_id: "never-issued",
+      request_id: 'never-issued',
       request_hash: Buffer.alloc(32, 0x07),
       decision: DECISION.approve,
     });
@@ -131,11 +127,11 @@ describe("PassportGateway — attack matrix (all fail closed)", () => {
     expect(v.reason).toMatch(/unknown request_id/i);
   });
 
-  it("TOCTOU: live action drifted from the issuance snapshot → block", () => {
+  it('TOCTOU: live action drifted from the issuance snapshot → block', () => {
     // Drive the verifier directly with a recompute that returns a different hash, simulating the
     // executable action changing between issuance and release.
     const store = new ActionStore();
-    const req = store.issue(sampleAction("req-toctou"));
+    const req = store.issue(sampleAction('req-toctou'));
     const env = passport.respond({
       request_id: req.request_id,
       request_hash: store.get(req.request_id)!.expected_request_hash,

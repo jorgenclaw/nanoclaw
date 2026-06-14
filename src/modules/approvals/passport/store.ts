@@ -11,9 +11,9 @@
 // interface (NonceStore from verify.ts) is shaped so a durable impl is a drop-in. See
 // groups/main/projects/keyos-authorization/gateway-enforcement-notes.md.
 
-import { randomBytes } from "node:crypto";
-import { requestHash, type AuthRequest, type Params } from "./canonical.js";
-import type { NonceStore, PendingRequest } from "./verify.js";
+import { randomBytes } from 'node:crypto';
+import { requestHash, type AuthRequest, type Params } from './canonical.js';
+import type { NonceStore, PendingRequest } from './verify.js';
 
 export interface ActionInput {
   request_id: string;
@@ -67,7 +67,7 @@ export class ActionStore implements NonceStore {
       issued_at_ms: req.issued_at_ms,
       expires_at_ms: req.expires_at_ms,
       expected_request_hash: requestHash(req),
-      state: "issued",
+      state: 'issued',
       request: req,
     });
     return req;
@@ -82,7 +82,7 @@ export class ActionStore implements NonceStore {
   /** Mark consumed. In-memory + single-threaded here; a durable impl must make this atomic. */
   consume(request_id: string): void {
     const r = this.rows.get(request_id);
-    if (r) r.state = "consumed";
+    if (r) r.state = 'consumed';
   }
 
   /**
@@ -93,7 +93,7 @@ export class ActionStore implements NonceStore {
    */
   recompute(p: PendingRequest): Buffer {
     const row = this.rows.get(p.request_id);
-    if (!row) throw new Error("recompute: unknown request_id");
+    if (!row) throw new Error('recompute: unknown request_id');
     return requestHash(row.request);
   }
 }

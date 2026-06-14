@@ -7,13 +7,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  SqliteActionStore,
-  PassportGateway,
-  StandInPassport,
-  DECISION,
-  type ActionInput,
-} from './index.js';
+import { SqliteActionStore, PassportGateway, StandInPassport, DECISION, type ActionInput } from './index.js';
 
 const passport = new StandInPassport();
 
@@ -38,9 +32,7 @@ describe('SqliteActionStore — round trip (in-memory db)', () => {
       pinnedPubkey: passport.pubkey,
       store: new SqliteActionStore(db),
     });
-    const v = await gw.authorize(sampleAction(), (a) =>
-      passport.respond({ ...a, decision: DECISION.approve }),
-    );
+    const v = await gw.authorize(sampleAction(), (a) => passport.respond({ ...a, decision: DECISION.approve }));
     expect(v.release).toBe(true);
     db.close();
   });

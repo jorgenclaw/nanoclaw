@@ -22,12 +22,12 @@
 //
 // Dependency-free on purpose: uses only node:crypto so it runs as the vector generator.
 
-import { createHash } from "node:crypto";
+import { createHash } from 'node:crypto';
 
 // --- Protocol constants (changing any of these is a breaking change) ---------------------------
 
 /** Exact domain-separation prefix. 17 bytes: "nanoclaw-auth/v1" + NUL. */
-export const DOMAIN = Buffer.from("nanoclaw-auth/v1\0", "latin1");
+export const DOMAIN = Buffer.from('nanoclaw-auth/v1\0', 'latin1');
 
 export const MSG_REQUEST = 0x01; // request preimage tag
 export const MSG_RESPONSE = 0x02; // response preimage tag
@@ -65,7 +65,7 @@ function lenBytes(b: Buffer): Buffer {
 }
 /** length-prefixed NFC-UTF8 string */
 function lenStr(s: string): Buffer {
-  return lenBytes(Buffer.from(s.normalize("NFC"), "utf8"));
+  return lenBytes(Buffer.from(s.normalize('NFC'), 'utf8'));
 }
 
 // --- Typed param map ---------------------------------------------------------------------------
@@ -75,22 +75,22 @@ function lenStr(s: string): Buffer {
 // params without touching the hashing core.
 
 export type ParamValue =
-  | { t: "u64"; v: bigint }
-  | { t: "str"; v: string }
-  | { t: "bytes"; v: Buffer }
-  | { t: "bool"; v: boolean };
+  | { t: 'u64'; v: bigint }
+  | { t: 'str'; v: string }
+  | { t: 'bytes'; v: Buffer }
+  | { t: 'bool'; v: boolean };
 
 export type Params = Record<string, ParamValue>;
 
 function encodeValue(val: ParamValue): Buffer {
   switch (val.t) {
-    case "u64":
+    case 'u64':
       return Buffer.concat([u8(T_U64), u64be(val.v)]);
-    case "str":
+    case 'str':
       return Buffer.concat([u8(T_STR), lenStr(val.v)]);
-    case "bytes":
+    case 'bytes':
       return Buffer.concat([u8(T_BYTES), lenBytes(val.v)]);
-    case "bool":
+    case 'bool':
       return Buffer.concat([u8(T_BOOL), u8(val.v ? 1 : 0)]);
     default:
       throw new Error(`unknown param type`);
@@ -99,14 +99,14 @@ function encodeValue(val: ParamValue): Buffer {
 
 export function encodeMap(params: Params): Buffer {
   const entries = Object.entries(params).map(([k, v]) => ({
-    key: Buffer.from(k.normalize("NFC"), "utf8"),
+    key: Buffer.from(k.normalize('NFC'), 'utf8'),
     value: encodeValue(v),
   }));
   // reject duplicate keys after NFC
   const seen = new Set<string>();
   for (const e of entries) {
-    const h = e.key.toString("hex");
-    if (seen.has(h)) throw new Error(`duplicate param key after NFC: ${e.key.toString("utf8")}`);
+    const h = e.key.toString('hex');
+    if (seen.has(h)) throw new Error(`duplicate param key after NFC: ${e.key.toString('utf8')}`);
     seen.add(h);
   }
   entries.sort((a, b) => Buffer.compare(a.key, b.key));
@@ -157,10 +157,10 @@ export interface AuthResponse {
 }
 
 export function responsePreimage(resp: AuthResponse): Buffer {
-  if (resp.request_hash.length !== 32) throw new Error("request_hash must be 32 bytes");
+  if (resp.request_hash.length !== 32) throw new Error('request_hash must be 32 bytes');
   if (resp.decision !== DECISION.approve && resp.decision !== DECISION.deny)
-    throw new Error("decision must be approve(1) or deny(0)");
-  if (resp.signer_pubkey.length !== 33) throw new Error("signer_pubkey must be 33 bytes (compressed)");
+    throw new Error('decision must be approve(1) or deny(0)');
+  if (resp.signer_pubkey.length !== 33) throw new Error('signer_pubkey must be 33 bytes (compressed)');
   return Buffer.concat([
     DOMAIN,
     u8(MSG_RESPONSE),
@@ -177,5 +177,5 @@ export function responseHash(resp: AuthResponse): Buffer {
 }
 
 export function sha256(b: Buffer): Buffer {
-  return createHash("sha256").update(b).digest();
+  return createHash('sha256').update(b).digest();
 }

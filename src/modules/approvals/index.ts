@@ -20,6 +20,9 @@ import { onDeliveryAdapterReady } from '../../delivery.js';
 import { registerResponseHandler, onShutdown } from '../../response-registry.js';
 import { handleApprovalsResponse } from './response-handler.js';
 import { startOneCLIApprovalHandler, stopOneCLIApprovalHandler } from './onecli-approvals.js';
+// Tier-1 passport gate: registers the `passport_authorize` delivery action (host half of the
+// container↔host authorize round trip). Side-effect import.
+import './passport/delivery.js';
 
 // Public API re-exports so consumers import from the module root.
 export { requestApproval, registerApprovalHandler, notifyAgent } from './primitive.js';

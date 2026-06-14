@@ -155,10 +155,9 @@ export class SqliteActionStore implements NonceStore {
         `SELECT request_id, nonce, issued_at_ms, expires_at_ms, expected_request_hash, state
          FROM passport_pending WHERE request_id = ?`,
       )
-      .get(request_id) as Pick<
-      PendingRow,
-      'request_id' | 'nonce' | 'issued_at_ms' | 'expires_at_ms' | 'expected_request_hash' | 'state'
-    > | undefined;
+      .get(request_id) as
+      | Pick<PendingRow, 'request_id' | 'nonce' | 'issued_at_ms' | 'expires_at_ms' | 'expected_request_hash' | 'state'>
+      | undefined;
     if (!row) return undefined;
     return {
       request_id: row.request_id,
@@ -208,14 +207,14 @@ export class SqliteActionStore implements NonceStore {
   setPinnedPubkey(pubkey: Buffer): void {
     if (pubkey.length !== 33) throw new Error('pinned pubkey must be 33 bytes (compressed)');
     this.db
-      .prepare(`INSERT INTO passport_pin (id, pubkey) VALUES (1, @pubkey) ON CONFLICT(id) DO UPDATE SET pubkey = excluded.pubkey`)
+      .prepare(
+        `INSERT INTO passport_pin (id, pubkey) VALUES (1, @pubkey) ON CONFLICT(id) DO UPDATE SET pubkey = excluded.pubkey`,
+      )
       .run({ pubkey });
   }
 
   getPinnedPubkey(): Buffer | undefined {
-    const row = this.db.prepare(`SELECT pubkey FROM passport_pin WHERE id = 1`).get() as
-      | { pubkey: Buffer }
-      | undefined;
+    const row = this.db.prepare(`SELECT pubkey FROM passport_pin WHERE id = 1`).get() as { pubkey: Buffer } | undefined;
     return row?.pubkey;
   }
 }

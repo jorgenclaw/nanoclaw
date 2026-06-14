@@ -6,13 +6,13 @@
 // round trip is testable offline while the USB / os-mcp transport is Foundation-blocked. When the
 // real transport lands, replace `respond()` with a call out to the device; nothing else moves.
 
-import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { createHash } from "node:crypto";
-import { DOMAIN, responseHash, type AuthResponse } from "./canonical.js";
-import type { ResponseEnvelope } from "./verify.js";
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { createHash } from 'node:crypto';
+import { DOMAIN, responseHash, type AuthResponse } from './canonical.js';
+import type { ResponseEnvelope } from './verify.js';
 
 function sha256(...parts: Buffer[]): Buffer {
-  const h = createHash("sha256");
+  const h = createHash('sha256');
   for (const p of parts) h.update(p);
   return h.digest();
 }
@@ -36,8 +36,8 @@ export class StandInPassport {
    * SHA256(DOMAIN ‖ context ‖ seed). Deterministic so tests pin a stable pubkey; pass a distinct
    * `seedLabel` to simulate a DIFFERENT (unpinned) device.
    */
-  constructor(seedLabel = "DEMO-SEED-stand-in-passport-v1") {
-    this.priv = sha256(DOMAIN, Buffer.from("signer-key-v1", "utf8"), Buffer.from(seedLabel, "utf8"));
+  constructor(seedLabel = 'DEMO-SEED-stand-in-passport-v1') {
+    this.priv = sha256(DOMAIN, Buffer.from('signer-key-v1', 'utf8'), Buffer.from(seedLabel, 'utf8'));
     this.pubkey = Buffer.from(secp256k1.getPublicKey(this.priv, true));
   }
 
@@ -46,8 +46,8 @@ export class StandInPassport {
    * Signature is 64-byte compact r||s, low-S (noble enforces it with { lowS: true }).
    */
   respond(args: SignArgs): ResponseEnvelope {
-    if (args.request_hash.length !== 32) throw new Error("request_hash must be 32 bytes");
-    const notes = args.notes ?? "";
+    if (args.request_hash.length !== 32) throw new Error('request_hash must be 32 bytes');
+    const notes = args.notes ?? '';
     const resp: AuthResponse = {
       request_hash: args.request_hash,
       decision: args.decision,

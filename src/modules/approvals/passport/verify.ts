@@ -15,8 +15,8 @@
 // The production OneCLI integration (mcp-server/src/verify.ts in the build-plan layout) should be a
 // thin adapter over this function — do not re-derive the checks there.
 
-import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { DECISION, responseHash } from "./canonical.js";
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { DECISION, responseHash } from './canonical.js';
 
 /** A request the gateway has issued a nonce for and is waiting on. Persisted server-side. */
 export interface PendingRequest {
@@ -25,7 +25,7 @@ export interface PendingRequest {
   issued_at_ms: bigint;
   expires_at_ms: bigint; // hard deadline; gateway clock is authoritative, never the Passport's
   expected_request_hash: Buffer; // 32-byte snapshot computed at issuance
-  state: "issued" | "consumed";
+  state: 'issued' | 'consumed';
 }
 
 export interface NonceStore {
@@ -59,40 +59,39 @@ export interface VerifyDeps {
 
 export type Verdict = {
   release: boolean;
-  decision: "approve" | "deny" | "none";
+  decision: 'approve' | 'deny' | 'none';
   reason: string;
 };
 
-function block(reason: string, decision: "deny" | "none" = "none"): Verdict {
+function block(reason: string, decision: 'deny' | 'none' = 'none'): Verdict {
   return { release: false, decision, reason };
 }
 
 export function verifyAuthorization(env: ResponseEnvelope, deps: VerifyDeps): Verdict {
   try {
     const p = deps.store.get(env.request_id);
-    if (!p) return block("unknown request_id");
-    if (p.state !== "issued") return block("request not in 'issued' state (replay / already consumed)");
-    if (deps.now_ms() > p.expires_at_ms) return block("request expired (fail-safe deny)");
+    if (!p) return block('unknown request_id');
+    if (p.state !== 'issued') return block("request not in 'issued' state (replay / already consumed)");
+    if (deps.now_ms() > p.expires_at_ms) return block('request expired (fail-safe deny)');
 
     // 1) Bind to live execution: recompute from the action we are about to run.
     const live = deps.recomputeRequestHash(p);
-    if (live.length !== 32) return block("recomputed request hash wrong length");
-    if (!live.equals(p.expected_request_hash)) return block("intended action drifted since issuance (TOCTOU)");
+    if (live.length !== 32) return block('recomputed request hash wrong length');
+    if (!live.equals(p.expected_request_hash)) return block('intended action drifted since issuance (TOCTOU)');
 
     // 2) WYSIWYS: what the Passport signed over must equal what we will execute.
-    if (env.returned_request_hash.length !== 32) return block("returned request hash wrong length");
-    if (!env.returned_request_hash.equals(live)) return block("WYSIWYS mismatch: signed action != executable action");
+    if (env.returned_request_hash.length !== 32) return block('returned request hash wrong length');
+    if (!env.returned_request_hash.equals(live)) return block('WYSIWYS mismatch: signed action != executable action');
 
     // 3) Signer identity must be the pinned device key (a serial number is NOT identity).
     if (env.signer_pubkey.length !== 33 || !env.signer_pubkey.equals(deps.pinnedPubkey))
-      return block("unknown signer (pubkey not pinned)");
+      return block('unknown signer (pubkey not pinned)');
 
     // 4) Decision must be a valid byte.
-    if (env.decision !== DECISION.approve && env.decision !== DECISION.deny)
-      return block("invalid decision byte");
+    if (env.decision !== DECISION.approve && env.decision !== DECISION.deny) return block('invalid decision byte');
 
     // 5) Verify the ECDSA signature over the response hash (which binds request_hash+decision+notes+signer).
-    if (env.signature.length !== 64) return block("signature must be 64-byte compact (r||s)");
+    if (env.signature.length !== 64) return block('signature must be 64-byte compact (r||s)');
     const msg = responseHash({
       request_hash: env.returned_request_hash,
       decision: env.decision,
@@ -100,16 +99,16 @@ export function verifyAuthorization(env: ResponseEnvelope, deps: VerifyDeps): Ve
       signer_pubkey: env.signer_pubkey,
     });
     const sigOk = secp256k1.verify(env.signature, msg, env.signer_pubkey, { lowS: true });
-    if (!sigOk) return block("signature invalid (or high-S)");
+    if (!sigOk) return block('signature invalid (or high-S)');
 
     // 6) Consume the nonce BEFORE acting — prevents concurrent reuse of a valid approval.
     if (env.decision === DECISION.deny) {
       deps.store.consume(env.request_id);
-      return { release: false, decision: "deny", reason: "human denied (signed)" };
+      return { release: false, decision: 'deny', reason: 'human denied (signed)' };
     }
     deps.store.consume(env.request_id);
-    return { release: true, decision: "approve", reason: "valid, fresh, pinned-signer approval" };
+    return { release: true, decision: 'approve', reason: 'valid, fresh, pinned-signer approval' };
   } catch (e) {
-    return block("exception → fail-closed: " + (e instanceof Error ? e.message : String(e)));
+    return block('exception → fail-closed: ' + (e instanceof Error ? e.message : String(e)));
   }
 }
