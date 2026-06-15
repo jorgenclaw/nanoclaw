@@ -176,7 +176,9 @@ export function nwcPayExecutor(): LightningExecutor {
       return { ok: false, error: 'host NWC_CONNECTION_STRING not configured' };
     }
     try {
-      const { stdout } = await execFileAsync('node', [WALLET_SCRIPT, 'pay', bolt11], {
+      // process.execPath = the exact node binary running the host. Bare 'node' fails under the systemd
+      // --user service, whose minimal PATH excludes the nvm node (spawn node ENOENT).
+      const { stdout } = await execFileAsync(process.execPath, [WALLET_SCRIPT, 'pay', bolt11], {
         env: { ...process.env, ...env, NWC_SPENDING: HOST_SPENDING_PATH },
         maxBuffer: 4 * 1024 * 1024,
         timeout: 60_000,
