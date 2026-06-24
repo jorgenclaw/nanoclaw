@@ -26,6 +26,9 @@ import './passport/delivery.js';
 // Option B (host-executed) gate: registers the `lightning_pay` delivery action — host authorizes AND
 // executes the payment with the host-held NWC credential. Side-effect import.
 import './passport/lightning.js';
+// Option B (host-executed) gate: registers the `nostr_post` delivery action — host authorizes AND
+// publishes via the host-held signing daemon. Side-effect import.
+import './passport/nostr-post.js';
 
 // Public API re-exports so consumers import from the module root.
 export { requestApproval, registerApprovalHandler, notifyAgent } from './primitive.js';
