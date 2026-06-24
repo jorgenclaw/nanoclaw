@@ -23,6 +23,16 @@ export async function handleRecurrence(inDb: Database.Database, session: Session
 
   for (const msg of recurring) {
     try {
+      // Defense-in-depth: SQL guard already filters empty strings, but if a
+      // malformed value slips past (e.g. whitespace-only), refuse to parse it.
+      // A valid 5-field cron expression must contain at least four spaces.
+      if (typeof msg.recurrence !== 'string' || msg.recurrence.split(' ').length < 5) {
+        log.warn('Skipping recurrence with malformed cron expression', {
+          messageId: msg.id,
+          recurrence: msg.recurrence,
+        });
+        continue;
+      }
       const { CronExpressionParser } = await import('cron-parser');
       // Interpret the cron expression in the user's timezone. v1 did this
       // (src/v1/task-scheduler.ts:20-49); without it, a task written "0 9 * * *"

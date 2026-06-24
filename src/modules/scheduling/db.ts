@@ -120,8 +120,10 @@ export interface RecurringMessage {
 }
 
 export function getCompletedRecurring(db: Database.Database): RecurringMessage[] {
+  // See note in central-db.ts:getCompletedRecurring — empty-string recurrence
+  // is treated as truthy by `IS NOT NULL` and would re-fire every sweep.
   return db
-    .prepare("SELECT * FROM messages_in WHERE status = 'completed' AND recurrence IS NOT NULL")
+    .prepare("SELECT * FROM messages_in WHERE status = 'completed' AND recurrence IS NOT NULL AND recurrence != ''")
     .all() as RecurringMessage[];
 }
 

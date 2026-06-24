@@ -79,7 +79,10 @@ export async function handleUpdateTask(
   if (typeof content.prompt === 'string') update.prompt = content.prompt;
   if (typeof content.processAfter === 'string') update.processAfter = content.processAfter;
   if (content.recurrence === null || typeof content.recurrence === 'string') {
-    update.recurrence = content.recurrence as string | null;
+    // Normalize empty string to null so the recurrence handler doesn't treat
+    // `''` as a recurring cron expression (see 2026-05-15 loop incident).
+    const r = content.recurrence as string | null;
+    update.recurrence = r === '' ? null : r;
   }
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;

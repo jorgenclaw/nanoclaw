@@ -141,8 +141,12 @@ export function markTaskProcessing(db: Database.Database, taskId: string): void 
 }
 
 export function getCompletedRecurring(db: Database.Database): CentralTask[] {
+  // `recurrence != ''` guards against empty-string writes that would otherwise
+  // be treated as recurring. CronExpressionParser.parse('') returns a parser
+  // that yields a "next run" a couple of minutes in the future instead of
+  // throwing, which silently creates a runaway loop. See 2026-05-15 incident.
   return db
-    .prepare("SELECT * FROM scheduled_tasks WHERE status = 'completed' AND recurrence IS NOT NULL")
+    .prepare("SELECT * FROM scheduled_tasks WHERE status = 'completed' AND recurrence IS NOT NULL AND recurrence != ''")
     .all() as CentralTask[];
 }
 
