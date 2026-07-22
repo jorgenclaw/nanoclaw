@@ -16,6 +16,7 @@ import {
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
   CONTAINER_MEMORY_LIMIT,
+  CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -28,12 +29,19 @@ import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+// Channel host-side config barrel — channels that ship container-side
+// infrastructure (e.g. nostr-dm's signing-socket bind-mount) self-register
+// on import.
+import './channels/index.js';
+import { getChannelContainerConfig, getRegisteredChannelNames } from './channels/channel-registry.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -259,6 +267,7 @@ function resolveProviderContribution(
         groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
         selectedSkills: selectedSkillNames(containerConfig),
         hostEnv: process.env,
+        containerEnv: containerConfig.env || {},
       })
     : {};
   return { provider, contribution };
@@ -348,6 +357,26 @@ export function buildMounts(
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
     mounts.push(...validated);
+  }
+
+  // Channel-contributed mounts (e.g. nostr-dm's signing socket + clawstr-post).
+  // Applied to every container regardless of whether the channel is wired to
+  // the agent group — these are cross-cutting tools (clawstr-post, signer
+  // socket) that any agent may invoke. Missing host paths are skipped so a
+  // stale registration can't break unrelated containers.
+  for (const name of getRegisteredChannelNames()) {
+    const cfg = getChannelContainerConfig(name);
+    if (!cfg?.mounts) continue;
+    for (const m of cfg.mounts) {
+      if (!fs.existsSync(m.hostPath)) {
+        log.warn('Skipping channel mount — host path missing', {
+          channel: name,
+          hostPath: m.hostPath,
+        });
+        continue;
+      }
+      mounts.push(m);
+    }
   }
 
   // Provider-contributed mounts (e.g. opencode-xdg)
@@ -469,6 +498,26 @@ async function buildContainerArgs(
     args.push(...hostGatewayArgs());
   }
 
+  // Anthropic goes through the native credential proxy (OAuth-aware), not OneCLI.
+  //
+  // IMPORTANT: Claude OAuth tokens (sk-ant-oat01-...) don't work through OneCLI's
+  // simple HTTPS proxy — they require the Claude Agent SDK's specific auth flow,
+  // which our native credential proxy implements. NO_PROXY excludes
+  // api.anthropic.com from OneCLI's HTTPS_PROXY so the Claude Agent SDK's
+  // requests go directly to our proxy instead; OneCLI (wired below, after volume
+  // mounts) handles credential injection for everything else. `host.docker.internal`
+  // resolves via hostGatewayArgs()'s --add-host mapping in the default (non-lockdown)
+  // bridge-networking path above — no per-platform IP rewrite needed anymore.
+  const authMode = detectAuthMode();
+  args.push('-e', `ANTHROPIC_BASE_URL=http://host.docker.internal:${CREDENTIAL_PROXY_PORT}`);
+  args.push('-e', 'NO_PROXY=api.anthropic.com,localhost,127.0.0.1');
+  args.push('-e', 'no_proxy=api.anthropic.com,localhost,127.0.0.1');
+  if (authMode === 'api-key') {
+    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+  } else {
+    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder-oauth-token');
+  }
+
   // User mapping
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
@@ -504,6 +553,55 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
+  // Main-group-only env vars from .env. Secrets listed here are injected
+  // as container env vars at spawn time, rather than stored in container.json
+  // (readable from inside the agent's workspace) or per-group config files.
+  // The agent never sees raw values in config files — only the process env.
+  //
+  // These are NOT proxied by OneCLI — OneCLI handles HTTPS API auth
+  // injection (Anthropic, OpenAI, Parallel) via HTTPS_PROXY + cert MITM.
+  // The secrets below are for services OneCLI doesn't proxy (WebSocket NWC,
+  // local-IP Proton Bridge IMAP/SMTP, AWS STS, bespoke APIs).
+  const mainSecrets = readEnvFile([
+    'GH_TOKEN',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_REGION',
+    'REMOTION_AWS_BUCKET',
+    'REMOTION_SERVE_URL',
+    'UDIOAPI_PRO_KEY',
+    // Lightning wallet (NWC). Previously in groups/main/config/nwc.json.
+    'NWC_CONNECTION_STRING',
+    // Proton Bridge auth (IMAP/SMTP). container.json mcpServers.proton.env
+    // references these via ${VAR} placeholders; agent-runner resolves them
+    // at MCP-spawn time from the container's process.env.
+    'PROTON_BRIDGE_USERNAME',
+    'PROTON_BRIDGE_PASSWORD',
+    // MoltBook API key. Previously in groups/main/config/moltbook_credentials.json
+    // read by tools/skills/moltbook at runtime. The skill binary now prefers
+    // the env var and only falls back to the file for local/dev setups.
+    'MOLTBOOK_API_KEY',
+  ]);
+  if (agentGroup.folder === 'main') {
+    for (const [key, value] of Object.entries(mainSecrets)) {
+      if (value) args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Per-agent-group env overrides — applied last so they win over OneCLI / native-proxy / mainSecrets.
+  if (containerConfig.env) {
+    for (const [key, value] of Object.entries(containerConfig.env)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Blocked hosts: resolve to 0.0.0.0 so they are unreachable inside the container.
+  if (containerConfig.blockedHosts) {
+    for (const host of containerConfig.blockedHosts) {
+      args.push('--add-host', `${host}:0.0.0.0`);
+    }
+  }
+
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
 
@@ -511,7 +609,20 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  // Pre-bun bootstrap: symlink any executable skill binaries into the node
+  // user's ~/.local/bin so skills that ship binaries (like moltbook) are on
+  // PATH inside the container without needing image rebuilds. Upstream's
+  // syncSkillSymlinks exposes skill DIRECTORIES to Claude; this exposes
+  // the binaries INSIDE those directories as commands.
+  const bootstrap = [
+    'mkdir -p ~/.local/bin',
+    'for f in /home/node/.claude/skills/*/*; do ' +
+      '[ -x "$f" ] && [ ! -d "$f" ] && ln -sf "$f" "$HOME/.local/bin/$(basename "$f")"; ' +
+      'done 2>/dev/null || true',
+    'export PATH="$HOME/.local/bin:$PATH"',
+    'exec bun run /app/src/index.ts',
+  ].join('; ');
+  args.push('-c', bootstrap);
 
   return args;
 }

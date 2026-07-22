@@ -18,6 +18,30 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'ONECLI_GATEWAY_URL',
+  'PASSPORT_TIER2_ENFORCE',
+  'PASSPORT_GATED_HOSTS',
+  'SIGNAL_PHONE_NUMBER',
+  'SIGNAL_CLI_TCP_HOST',
+  'SIGNAL_CLI_TCP_PORT',
+  'WATCH_AUTH_TOKEN',
+  'WATCH_HTTP_PORT',
+  'WATCH_HTTP_BIND',
+  'WATCH_JID',
+  'WATCH_GROUP_FOLDER',
+  'WATCH_SYNC_TIMEOUT_MS',
+  'WATCH_SIGNAL_MIRROR_JID',
+  'WN_BINARY_PATH',
+  'WN_SOCKET_PATH',
+  'WN_ACCOUNT_PUBKEY',
+  'NOSTR_SIGNER_SOCKET',
+  'NOSTR_DM_RELAYS',
+  'NOSTR_DM_ALLOWLIST',
+  'CREDENTIAL_PROXY_PORT',
+  'SECURITY_POLICY_PATH',
+  'MCP_SERVER_ENABLED',
+  'WHISPER_BIN',
+  'WHISPER_MODEL',
 ]);
 
 /**
@@ -47,8 +71,8 @@ export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 
 // Absolute paths needed for container mounts
-const PROJECT_ROOT = process.cwd();
-const HOME_DIR = process.env.HOME || os.homedir();
+export const PROJECT_ROOT = process.cwd();
+export const HOME_DIR = process.env.HOME || os.homedir();
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
@@ -79,6 +103,43 @@ export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API
 export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || envConfig.CONTAINER_CPU_LIMIT || '';
 export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envConfig.CONTAINER_MEMORY_LIMIT || '';
 
+// The OneCLI SDK auto-resolves the gateway via GET /api/gateway-url, which returns
+// "http://localhost:10255". That bind is unreachable from the host process — the proxy listens only
+// on the docker-bridge IP (172.17.0.1:10255), so the approval long-poll silently connection-refuses
+// forever and manual-approval never fires. We override with the same host we already reach the OneCLI
+// control plane on, port 10255. Override explicitly via ONECLI_GATEWAY_URL if the gateway moves.
+function deriveGatewayUrl(controlUrl: string | undefined): string | undefined {
+  if (!controlUrl) return undefined;
+  try {
+    const u = new URL(controlUrl);
+    u.port = '10255';
+    return u.origin;
+  } catch {
+    return undefined;
+  }
+}
+export const ONECLI_GATEWAY_URL =
+  process.env.ONECLI_GATEWAY_URL || envConfig.ONECLI_GATEWAY_URL || deriveGatewayUrl(ONECLI_URL);
+
+// Passport Tier-2 backstop (see src/modules/approvals/passport/). Default OFF = shadow mode: log what
+// the gate WOULD decide, deny nothing. Flip to 'true' only after the shadow logs look right — that's
+// when a credentialed call to a gated host without a redeemable token actually gets denied.
+export const PASSPORT_TIER2_ENFORCE =
+  (process.env.PASSPORT_TIER2_ENFORCE || envConfig.PASSPORT_TIER2_ENFORCE) === 'true';
+// Comma-separated hosts that REQUIRE a valid Passport action-id token (e.g. 'api.github.com'). A held
+// call to one of these with no/invalid token is the deny target under enforcement. Empty = no host is
+// token-required (Tier-2 still handles any token-bearing call, but denies nothing on absence).
+export const PASSPORT_GATED_HOSTS = (process.env.PASSPORT_GATED_HOSTS || envConfig.PASSPORT_GATED_HOSTS || '')
+  .split(',')
+  .map((h) => h.trim().toLowerCase())
+  .filter(Boolean);
+// NOTE: MAX_MESSAGES_PER_PROMPT / IDLE_TIMEOUT / MAX_CONCURRENT_CONTAINERS / buildTriggerPattern /
+// DEFAULT_TRIGGER / getTriggerPattern existed in the pre-upgrade fork's config.ts but are dropped here —
+// confirmed unused by any file in this port (grep across src/ turned up nothing referencing them by
+// name). maxMessagesPerPrompt is now a per-group container_configs DB field (see container-config.ts);
+// trigger matching moved to the channel-defaults / engage_mode system (see channels/channel-defaults.ts);
+// idle detection is now inline sweep logic in host-sweep.ts.
+
 // Egress lockdown — force all agent traffic through the OneCLI gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
@@ -97,3 +158,71 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// --- Custom channel config ---
+
+// Signal (TCP JSON-RPC to signal-cli daemon)
+export const SIGNAL_PHONE_NUMBER = process.env.SIGNAL_PHONE_NUMBER || envConfig.SIGNAL_PHONE_NUMBER || '';
+export const SIGNAL_CLI_TCP_HOST = process.env.SIGNAL_CLI_TCP_HOST || envConfig.SIGNAL_CLI_TCP_HOST || '127.0.0.1';
+export const SIGNAL_CLI_TCP_PORT = parseInt(
+  process.env.SIGNAL_CLI_TCP_PORT || envConfig.SIGNAL_CLI_TCP_PORT || '7583',
+  10,
+);
+
+// Watch (T-Watch S3 HTTP server)
+export const WATCH_AUTH_TOKEN = process.env.WATCH_AUTH_TOKEN || envConfig.WATCH_AUTH_TOKEN || '';
+export const WATCH_HTTP_PORT = parseInt(process.env.WATCH_HTTP_PORT || envConfig.WATCH_HTTP_PORT || '3000', 10);
+export const WATCH_HTTP_BIND = process.env.WATCH_HTTP_BIND || envConfig.WATCH_HTTP_BIND || '0.0.0.0';
+export const WATCH_JID = process.env.WATCH_JID || envConfig.WATCH_JID || 'watch:device';
+export const WATCH_GROUP_FOLDER = process.env.WATCH_GROUP_FOLDER || envConfig.WATCH_GROUP_FOLDER || 'watch';
+export const WATCH_SYNC_TIMEOUT_MS = parseInt(
+  process.env.WATCH_SYNC_TIMEOUT_MS || envConfig.WATCH_SYNC_TIMEOUT_MS || '45000',
+  10,
+);
+export const WATCH_SIGNAL_MIRROR_JID = process.env.WATCH_SIGNAL_MIRROR_JID || envConfig.WATCH_SIGNAL_MIRROR_JID || '';
+export const WATCH_FIRMWARE_DIR =
+  process.env.WATCH_FIRMWARE_DIR || envConfig.WATCH_FIRMWARE_DIR || path.join(DATA_DIR, 'watch-firmware');
+
+// White Noise (Nostr/MLS encrypted messaging)
+export const WN_BINARY_PATH =
+  process.env.WN_BINARY_PATH || envConfig.WN_BINARY_PATH || path.join(HOME_DIR, '.local', 'bin', 'wn');
+export const WN_SOCKET_PATH =
+  process.env.WN_SOCKET_PATH ||
+  envConfig.WN_SOCKET_PATH ||
+  path.join(HOME_DIR, '.local', 'share', 'whitenoise-cli', 'release', 'wnd.sock');
+export const WN_ACCOUNT_PUBKEY = process.env.WN_ACCOUNT_PUBKEY || envConfig.WN_ACCOUNT_PUBKEY || '';
+
+// Nostr DM (NIP-17)
+export const NOSTR_SIGNER_SOCKET =
+  process.env.NOSTR_SIGNER_SOCKET || envConfig.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
+export const NOSTR_DM_RELAYS = (
+  process.env.NOSTR_DM_RELAYS ||
+  envConfig.NOSTR_DM_RELAYS ||
+  'wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band'
+).split(',');
+export const NOSTR_DM_ALLOWLIST = new Set(
+  (process.env.NOSTR_DM_ALLOWLIST || envConfig.NOSTR_DM_ALLOWLIST || '').split(',').filter(Boolean),
+);
+
+// MCP Server
+export const MCP_SERVER_ENABLED = (process.env.MCP_SERVER_ENABLED || envConfig.MCP_SERVER_ENABLED) === 'true';
+
+// Security Policy
+export const SECURITY_POLICY_PATH =
+  process.env.SECURITY_POLICY_PATH ||
+  envConfig.SECURITY_POLICY_PATH ||
+  path.join(HOME_DIR, '.config', 'nanoclaw', 'security-policy.json');
+
+// Credential Proxy
+export const CREDENTIAL_PROXY_PORT = parseInt(
+  process.env.CREDENTIAL_PROXY_PORT || envConfig.CREDENTIAL_PROXY_PORT || '3001',
+  10,
+);
+
+// Local Whisper transcription
+export const WHISPER_BIN =
+  process.env.WHISPER_BIN ?? envConfig.WHISPER_BIN ?? path.join(HOME_DIR, '.local', 'bin', 'whisper-cli');
+export const WHISPER_MODEL =
+  process.env.WHISPER_MODEL ??
+  envConfig.WHISPER_MODEL ??
+  path.join(HOME_DIR, '.local', 'share', 'whisper', 'models', 'ggml-base.en.bin');

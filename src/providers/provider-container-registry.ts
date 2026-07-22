@@ -42,6 +42,12 @@ export interface ProviderContainerContext {
   selectedSkills: string[];
   /** `process.env` at spawn time — pull passthrough values from here. */
   hostEnv: NodeJS.ProcessEnv;
+  /**
+   * Per-group env overrides from container_configs (ContainerConfig.env). Currently
+   * unpopulated in practice — no live group sets it — but threaded through for
+   * forward compatibility; see container-config.ts.
+   */
+  containerEnv?: Record<string, string>;
 }
 
 export interface ProviderContainerContribution {
