@@ -95,4 +95,27 @@ describe('handleRecurrence', () => {
     const count = (db.prepare(`SELECT COUNT(*) AS c FROM messages_in`).get() as { c: number }).c;
     expect(count).toBe(1);
   });
+
+  it('does not clone rows whose recurrence is an empty string', async () => {
+    // Regression: on 2026-05-15, an UPDATE that set recurrence='' (instead of
+    // NULL) produced a 49-row runaway loop because `IS NOT NULL` treats `''`
+    // as a recurring expression and cron-parser doesn't throw on empty input.
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-1',
+      processAfter: '2020-01-01T00:00:00.000Z',
+      recurrence: null,
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ prompt: 'oops' }),
+    });
+    // Bypass insertTask's normalization to simulate a direct buggy write.
+    db.prepare(`UPDATE messages_in SET status='completed', recurrence='' WHERE id='task-1'`).run();
+
+    await handleRecurrence(db, fakeSession());
+
+    const count = (db.prepare(`SELECT COUNT(*) AS c FROM messages_in`).get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
 });

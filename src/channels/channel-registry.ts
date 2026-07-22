@@ -8,6 +8,7 @@ import type { ChannelAdapter, ChannelRegistration, ChannelSetup } from './adapte
 import { log } from '../log.js';
 
 const SETUP_RETRY_DELAYS_MS = [2000, 5000, 10000];
+const SETUP_TIMEOUT_MS = 90_000;
 
 /** Duck-type check — adapters that throw an Error with `name === 'NetworkError'`
  * (Chat SDK's `@chat-adapter/shared.NetworkError` and similar) get a retry on
@@ -17,6 +18,22 @@ function isNetworkError(err: unknown): err is Error {
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(msg)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
 
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
@@ -51,12 +68,16 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
  * Skips adapters that return null (missing credentials).
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
-  for (const [name, registration] of registry) {
+  // Run adapter setups concurrently so a slow or hung adapter cannot block the
+  // rest of the chain. Each adapter also has its own setup timeout — without it,
+  // a permanent hang in one adapter's setup() would leave the returned Promise
+  // pending forever and block host startup.
+  const startups = [...registry].map(async ([name, registration]) => {
     try {
       const adapter = await registration.factory();
       if (!adapter) {
         log.warn('Channel credentials missing, skipping', { channel: name });
-        continue;
+        return;
       }
 
       const setup = setupFn(adapter);
@@ -67,7 +88,11 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
       let attempt = 0;
       while (true) {
         try {
-          await adapter.setup(setup);
+          await withTimeout(
+            adapter.setup(setup),
+            SETUP_TIMEOUT_MS,
+            `Channel adapter ${name} setup timed out after ${SETUP_TIMEOUT_MS}ms`,
+          );
           break;
         } catch (err) {
           if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
@@ -90,7 +115,8 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
     } catch (err) {
       log.error('Failed to start channel adapter', { channel: name, err });
     }
-  }
+  });
+  await Promise.allSettled(startups);
 }
 
 /** Tear down all active adapters. */

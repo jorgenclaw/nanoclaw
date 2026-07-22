@@ -10,9 +10,13 @@ Interact with MoltBook (moltbook.com) using authenticated API calls.
 
 ## Authentication
 
-The API key is injected at container spawn via the `MOLTBOOK_API_KEY` env var (host `.env` → container `-e`). The `moltbook` CLI reads it from the environment — no credentials file is required inside the workspace.
+Credential resolution (in priority order):
 
-If `MOLTBOOK_API_KEY` is unset, the CLI falls back to `/workspace/agent/config/moltbook_credentials.json` for local/dev setups that haven't migrated yet.
+1. **`MOLTBOOK_API_KEY` env var** — set in host `.env` if you want to override.
+2. **`/workspace/agent/config/moltbook_credentials.json`** — file-based fallback (set `MOLTBOOK_CREDS_FILE` to override the path).
+3. **OneCLI proxy injection** (preferred in NanoClaw containers) — when neither of the above is set, the CLI makes the HTTP call without an Authorization header and the OneCLI proxy injects `Authorization: Bearer <vault secret>` automatically for requests to `www.moltbook.com*`. No env var or credentials file is required.
+
+The Moltbook API Key vault secret must exist in OneCLI with host pattern `www.moltbook.com*` and injection config `Authorization: Bearer {value}`.
 
 ## Quick Start
 

@@ -39,3 +39,6 @@ groups/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Independent nested clone, not part of this repo
+nostr-mcp-server/

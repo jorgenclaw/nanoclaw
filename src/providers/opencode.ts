@@ -75,12 +75,26 @@ function clearAgentRunnerSdkSessionId(sessionDir: string): void {
 }
 
 /**
+ * Cache Ollama model fingerprints so the digest stays stable across calls.
+ * `ollama show --modelfile` can return inconsistent output (different blobs
+ * for the same logical model), so we store the first successful result and
+ * reuse it. Only the first call for a given model name computes the digest;
+ * subsequent calls return the cached value.
+ */
+const fingerprintCache = new Map<string, string>();
+
+/**
  * Compute a fingerprint for the current model. Includes the Ollama Modelfile
  * digest (when applicable) so a same-name Modelfile recreate invalidates the
  * cache. Returns the bare model name unchanged for non-Ollama providers or
  * when the Ollama lookup fails (degraded — equivalent to the prior behavior).
  */
 function computeModelFingerprint(currentModel: string): string {
+  // Check cache first — reuse the first successful digest so the fingerprint
+  // stays stable even if Ollama returns different content on subsequent calls.
+  const cached = fingerprintCache.get(currentModel);
+  if (cached) return cached;
+
   // Recognize Ollama in two forms:
   //   "ollama/gemma4:31b-jorgenclaw" — provider/model syntax
   //   "gemma4:31b-jorgenclaw"        — bare model when OPENCODE_PROVIDER=ollama
@@ -94,16 +108,20 @@ function computeModelFingerprint(currentModel: string): string {
   try {
     const modelfile = execFileSync('ollama', ['show', '--modelfile', ollamaName], {
       encoding: 'utf8',
-      timeout: 5000,
+      timeout: 30000,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     const digest = crypto.createHash('sha256').update(modelfile).digest('hex').slice(0, 16);
-    return `${currentModel}|${digest}`;
+    const fingerprint = `${currentModel}|${digest}`;
+    fingerprintCache.set(currentModel, fingerprint);
+    return fingerprint;
   } catch (err) {
     log.warn('OpenCode auto-wipe: Ollama digest probe failed — falling back to name-only', {
       model: currentModel,
       err: (err as Error).message,
     });
+    // Cache the fallback too — if the first call failed, don't keep retrying
+    fingerprintCache.set(currentModel, currentModel);
     return currentModel;
   }
 }

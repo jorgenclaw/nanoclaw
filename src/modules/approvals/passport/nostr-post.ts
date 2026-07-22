@@ -130,14 +130,10 @@ export function clawstrPostExecutor(): NostrPostExecutor {
       ? `${process.env.XDG_RUNTIME_DIR}/nostr-signer.sock`
       : '/run/user/1000/nostr-signer.sock';
     try {
-      const { stdout } = await execFileAsync(
-        process.execPath,
-        [CLAWSTR_POST_SCRIPT, 'post', subclaw, body],
-        {
-          env: { ...process.env, NOSTR_SIGNER_SOCKET: signerSocket },
-          timeout: 30_000,
-        },
-      );
+      const { stdout } = await execFileAsync(process.execPath, [CLAWSTR_POST_SCRIPT, 'post', subclaw, body], {
+        env: { ...process.env, NOSTR_SIGNER_SOCKET: signerSocket },
+        timeout: 30_000,
+      });
       const trimmed = stdout.trim();
       const eventId = trimmed.match(/[0-9a-f]{64}/)?.[0];
       return { ok: true, eventId };

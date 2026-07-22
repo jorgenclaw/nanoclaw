@@ -1,23 +1,25 @@
 #!/bin/bash
 # MoltBook CLI - Interact with MoltBook API
-# Credential resolution: MOLTBOOK_API_KEY env var (preferred)
-# → /workspace/agent/config/moltbook_credentials.json (fallback)
+# Credential resolution (in order):
+#   1. MOLTBOOK_API_KEY env var
+#   2. /workspace/agent/config/moltbook_credentials.json (or $MOLTBOOK_CREDS_FILE)
+#   3. No local credential — OneCLI proxy injects Authorization: Bearer <vault secret>
+#      when requests reach www.moltbook.com (preferred in NanoClaw containers)
 # Uses node for JSON (python3 not available in container image).
 
 set -e
 
-# Resolve API key: env var wins over file. File path remains for local/dev
-# setups; containers spawned from NanoClaw get the key via container env.
+# Resolve API key. If neither env var nor file is present, proceed with empty
+# API_KEY — the OneCLI proxy will inject the Authorization header automatically
+# for requests to www.moltbook.com* from the vault secret.
+API_KEY=""
 if [ -n "${MOLTBOOK_API_KEY:-}" ]; then
     API_KEY="$MOLTBOOK_API_KEY"
 else
     CREDS_FILE="${MOLTBOOK_CREDS_FILE:-/workspace/agent/config/moltbook_credentials.json}"
-    if [ ! -f "$CREDS_FILE" ]; then
-        echo "Error: MOLTBOOK_API_KEY env var not set and no credentials file at $CREDS_FILE" >&2
-        echo "Set MOLTBOOK_API_KEY in host .env or create the credentials file." >&2
-        exit 1
+    if [ -f "$CREDS_FILE" ]; then
+        API_KEY=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$CREDS_FILE','utf8')).api_key)")
     fi
-    API_KEY=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$CREDS_FILE','utf8')).api_key)")
 fi
 
 API_BASE="${MOLTBOOK_API_BASE:-https://www.moltbook.com/api/v1}"
@@ -53,14 +55,21 @@ api_call() {
     local endpoint="$2"
     local data="$3"
 
+    # Build auth header only when we have a local key. When API_KEY is empty,
+    # the OneCLI proxy injects Authorization: Bearer <vault value> automatically.
+    local auth_args=()
+    if [ -n "$API_KEY" ]; then
+        auth_args=(-H "Authorization: Bearer $API_KEY")
+    fi
+
     if [ -z "$data" ]; then
         curl -s -X "$method" \
-            -H "Authorization: Bearer $API_KEY" \
+            "${auth_args[@]}" \
             -H "Content-Type: application/json" \
             "${API_BASE}${endpoint}" | json_pretty
     else
         curl -s -X "$method" \
-            -H "Authorization: Bearer $API_KEY" \
+            "${auth_args[@]}" \
             -H "Content-Type: application/json" \
             -d "$data" \
             "${API_BASE}${endpoint}" | json_pretty
@@ -247,9 +256,7 @@ case "$1" in
         echo "  dm @user \"message\"          Send DM"
         echo "  inbox                       Check DMs"
         echo ""
-        echo "Credential resolution: MOLTBOOK_API_KEY env var (preferred)"
-        echo "                       → \$MOLTBOOK_CREDS_FILE or"
-        echo "                         /workspace/agent/config/moltbook_credentials.json"
+        echo "Credential resolution: MOLTBOOK_API_KEY env var → credentials file → OneCLI proxy"
         exit 1
         ;;
 esac

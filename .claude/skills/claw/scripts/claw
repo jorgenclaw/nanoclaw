@@ -41,20 +41,20 @@ def _find_nanoclaw_dir() -> Path:
 
     Resolution order:
     1. NANOCLAW_DIR env var
-    2. The directory containing this script (if it looks like a NanoClaw install)
+    2. Walk up from the script location looking for NanoClaw markers
     3. ~/src/nanoclaw (legacy default)
     """
     if env := os.environ.get("NANOCLAW_DIR"):
         return Path(env).expanduser()
-    # If this script lives inside the NanoClaw tree (e.g. scripts/claw), walk up
     here = Path(__file__).resolve()
-    for parent in [here.parent, here.parent.parent]:
-        if (parent / "store" / "messages.db").exists() or (parent / ".env").exists():
+    # Walk up multiple levels to handle script being inside .claude/skills/
+    for parent in [here.parent, here.parent.parent, here.parent.parent.parent, here.parent.parent.parent.parent, here.parent.parent.parent.parent.parent]:
+        if (parent / "store" / "messages.db").exists() or (parent / "data" / "v2.db").exists() or (parent / ".env").exists():
             return parent
     return Path.home() / "src" / "nanoclaw"
 
 NANOCLAW_DIR = _find_nanoclaw_dir()
-DB_PATH      = NANOCLAW_DIR / "store" / "messages.db"
+DB_PATH      = NANOCLAW_DIR / "data" / "v2.db"
 ENV_FILE     = NANOCLAW_DIR / ".env"
 IMAGE        = "nanoclaw-agent:latest"
 
@@ -98,11 +98,12 @@ def read_secrets(env_file: Path) -> dict:
 
 def get_groups(db: Path) -> list[dict]:
     conn = sqlite3.connect(db)
+    # v2 DB uses agent_groups table
     rows = conn.execute(
-        "SELECT jid, name, folder, is_main FROM registered_groups ORDER BY name"
+        "SELECT id, name, folder FROM agent_groups ORDER BY name"
     ).fetchall()
     conn.close()
-    return [{"jid": r[0], "name": r[1], "folder": r[2], "is_main": bool(r[3])} for r in rows]
+    return [{"jid": r[0], "name": r[1], "folder": r[2], "is_main": r[1] == "Jorgenclaw"} for r in rows]
 
 
 def find_group(groups: list[dict], query: str) -> dict | None:
