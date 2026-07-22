@@ -4,7 +4,9 @@ import path from 'path';
 
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
+import { getActiveRouting } from '../active-routing.js';
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { writeMessageOut } from '../db/messages-out.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { registerProvider } from './provider-registry.js';
@@ -93,11 +95,7 @@ const SDK_DISALLOWED_TOOLS = [
   'ReportFindings',
 ];
 
-// Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
-// at the call site from the registered `mcpServers` map so that any server
-// added via `add_mcp_server` (or wired in container.json directly) is
-// reachable to the agent — without this, the SDK's allowedTools filter
-// silently drops every MCP namespace not listed here.
+// Tool allowlist for NanoClaw agent containers
 const TOOL_ALLOWLIST = [
   'Bash',
   'Read',
@@ -117,6 +115,7 @@ const TOOL_ALLOWLIST = [
   'ToolSearch',
   'Skill',
   'NotebookEdit',
+  'mcp__nanoclaw__*',
 ];
 
 // MCP server names are sanitized by the SDK when forming tool prefixes:
@@ -439,12 +438,8 @@ function transcriptStartMs(transcriptPath: string): number | null {
 /**
  * Claude Code auto-compacts context at this window (tokens). Kept here so
  * the generic bootstrap doesn't need to know about Claude-specific env vars.
- *
- * Operator override: set CLAUDE_CODE_AUTO_COMPACT_WINDOW in the host env to
- * raise or lower the threshold without editing source — useful when running
- * with a 1M-context model variant or when emergency-tuning a deployment.
  */
-const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '165000';
+const CLAUDE_CODE_AUTO_COMPACT_WINDOW = '165000';
 
 /**
  * Stale-session detection. Matches Claude Code's error text when a
@@ -535,7 +530,7 @@ export class ClaudeProvider implements AgentProvider {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
+        pathToClaudeCodeExecutable: '/app/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude',
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
@@ -559,6 +554,9 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    const COMPACT_WINDOW = parseInt(CLAUDE_CODE_AUTO_COMPACT_WINDOW, 10);
+    const EARLY_WARNING_THRESHOLD = Math.floor(COMPACT_WINDOW * 0.8);
+    let earlyWarningSent = false;
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
@@ -568,6 +566,33 @@ export class ClaudeProvider implements AgentProvider {
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
+
+        // Track token usage for early warning
+        if (!earlyWarningSent && message.type === 'assistant') {
+          const usage = (message as { message?: { usage?: { input_tokens?: number } } }).message?.usage;
+          if (usage?.input_tokens && usage.input_tokens >= EARLY_WARNING_THRESHOLD) {
+            earlyWarningSent = true;
+            const pct = Math.round((usage.input_tokens / COMPACT_WINDOW) * 100);
+            const routing = getActiveRouting();
+            if (routing?.platformId && routing?.channelType) {
+              try {
+                writeMessageOut({
+                  id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  kind: 'chat',
+                  platform_id: routing.platformId,
+                  channel_type: routing.channelType,
+                  thread_id: routing.threadId,
+                  content: JSON.stringify({
+                    text: `-- CONTEXT WARNING (${pct}%) --\nContext window is ${pct}% full (${usage.input_tokens.toLocaleString()}/${COMPACT_WINDOW.toLocaleString()} tokens). Auto-compaction fires at ~92%.\nSend /compact now to compact on your terms, or tell me what to save to memory first.`,
+                  }),
+                });
+                log(`Early warning sent at ${pct}% (${usage.input_tokens} tokens)`);
+              } catch {
+                // Non-fatal
+              }
+            }
+          }
+        }
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };

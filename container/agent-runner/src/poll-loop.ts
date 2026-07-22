@@ -6,7 +6,8 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { writeMessageOut, getOutboundCount } from './db/messages-out.js';
+import { setActiveRouting } from './active-routing.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -157,6 +158,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markProcessing(ids);
 
     const routing = extractRouting(messages);
+    // Cache for cross-module reads (e.g. providers/claude.ts's compaction
+    // notifications) that don't have this batch's routing threaded to them.
+    setActiveRouting(routing);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -229,6 +233,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
       continue;
     }
+
+    // Auto-transcribe audio attachments before formatting
+    const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+    keep = await autoTranscribeMessages(keep);
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
@@ -434,6 +442,8 @@ export async function processQuery(
         if (done) return;
 
         const keptIds = keep.map((m) => m.id);
+        const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+        keep = await autoTranscribeMessages(keep);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
@@ -501,8 +511,20 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Silent-turn fallback: if this turn produces no user-visible output at
+        // all (empty result, or hallucinated tool-call syntax the filter above
+        // suppressed to nothing), the user would otherwise see no reply. Snapshot
+        // before dispatch and compare after; skip for task runs (output goes to
+        // the run log, not chat — silence there is normal, and the extra DB
+        // round-trip is skipped entirely so it can't contend with the follow-up
+        // poller's concurrent DB access mid-task-run) and when a retry nudge is
+        // already queued (the agent gets another chance this same tick).
+        const outboundCountBeforeDispatch = routing.taskRun ? -1 : getOutboundCount();
+        let retryQueued = false;
+        let producedUnwrappedScratchpad = false;
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
+          producedUnwrappedScratchpad = hasUnwrapped;
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
@@ -533,6 +555,7 @@ export async function processQuery(
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
+              retryQueued = true;
               const destinations = getAllDestinations();
               const names = destinations.map((d) => d.name).join(', ');
               query.push(
@@ -544,6 +567,7 @@ export async function processQuery(
             }
             if (willRetryTaskBlocks) {
               taskBlockNudged = true;
+              retryQueued = true;
               const names = getAllDestinations()
                 .map((d) => d.name)
                 .join(', ');
@@ -555,6 +579,24 @@ export async function processQuery(
             if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
           }
         } else archivePrompts.shift();
+
+        if (
+          !retryQueued &&
+          !producedUnwrappedScratchpad &&
+          !routing.taskRun &&
+          getOutboundCount() === outboundCountBeforeDispatch
+        ) {
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({
+              text: 'Sorry — I had trouble producing a response that turn. Could you try again, maybe rephrasing?',
+            }),
+          });
+        }
       }
     }
   } catch (err) {
@@ -638,10 +680,37 @@ export interface TaskMessageBlock {
   body: string;
 }
 
+/**
+ * Smaller/local models (gemma4:26b, qwen3.6:35b) sometimes fail to emit a
+ * structured tool call and instead write the tool-call syntax as literal
+ * text in the result — forwarding it reads as the agent having crashed.
+ * Two shapes observed in production: gemma's `call:bash{...}<tool_call|>`
+ * and qwen's XML-style `<parameter=name>...</function></tool_call>`. Applied
+ * before any downstream parsing so neither the <message> dispatch nor the
+ * scratchpad path can leak it.
+ */
+function looksLikeHallucinatedToolCall(text: string): boolean {
+  if (text.trim().length === 0 || text.length >= 600) return false;
+  const markers = [
+    /<\|?tool_call\|?>/i,
+    /<\/tool_call>/i,
+    /<\/function>/i,
+    /\bcall:[a-z][a-z0-9_]*\s*\{/i,
+    /<\|"\|>/,
+    /<parameter\s*=\s*[a-z_][a-z0-9_]*\s*>/i,
+    /<parameter\s+name\s*=\s*"[^"]+"\s*>/i,
+  ];
+  return markers.some((re) => re.test(text));
+}
+
 export function dispatchResultText(
   text: string,
   routing: RoutingContext,
 ): { sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] } {
+  if (looksLikeHallucinatedToolCall(text)) {
+    log(`Suppressed hallucinated tool-call syntax in result text (${text.length} chars)`);
+    return { sent: 0, hasUnwrapped: false, taskBlocks: [] };
+  }
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
