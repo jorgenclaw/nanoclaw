@@ -1,15 +1,20 @@
 # NanoClaw Migration Guide — Scott's sovereign-first install
 
-**Generated:** 2026-05-08
-**Base (merge-base with upstream/main):** `cf2b1c9755e2b547bd012aaa5cd14116e28c71c7`
-**HEAD at generation:** (current state of `skill/x-integration-v2-linux` after the 2026-05-08 substantive-work commit)
-**Upstream HEAD:** `ef43cbb` (`upstream/main` as of fetch on 2026-05-08)
-**User commits ahead of base:** 30
-**Upstream commits ahead of base:** 461
+**Generated:** 2026-05-08 · **Updated:** 2026-07-22 (see "Update log" below)
+**Base (merge-base with upstream/main):** `cf2b1c9755e2b547bd012aaa5cd14116e28c71c7` (original) / `ef43cbb3d9505514a2c82427088ad1b105a957ee` (current merge-base as of 2026-07-22 update — the 2026-05-08 migration completed and this became the new fork point)
+**HEAD at generation:** (current state of `skill/x-integration-v2-linux` after the 2026-05-08 substantive-work commit) — superseded, see update log
+**HEAD at 2026-07-22 update:** `765b2464`
+**Upstream HEAD:** `ef43cbb` (`upstream/main` as of fetch on 2026-05-08) → `641963c1` (as of fetch on 2026-07-22)
+**User commits ahead of base:** 30 (original) → 29 ahead of `ef43cbb` (as of 2026-07-22)
+**Upstream commits ahead of base:** 461 (original) → 720 ahead of `ef43cbb` (as of 2026-07-22)
+
+## Update log
+
+- **2026-07-22**: The 2026-05-08 migration in this guide was fully applied (replay landed at commit `b9009b84`, "migrate Scott's customizations onto upstream/main (ef43cbb)"). Sections `01`–`06` below describe that completed migration and remain accurate for everything they cover — **do not re-run them**, they're historical record of what's already in the tree. 24 new commits landed on top since then (`757471f4`..`765b2464`), documented in new sections `07`–`10`: a new Passport Tier-1/Tier-2 credentialed-action approval-gate subsystem (the bulk of the new work), agent-runner reliability fixes, several small channel/skill customizations, and a scheduling correctness fix. See "Skill Interactions" below for how Passport relates to the `security-policy.ts` engine described in section `04`/`06` — no conflict found.
 
 ## Tier classification: 3 (complex)
 
-This is a deep fork. Customizations span 5 entirely-new channel adapters, X-integration v2 (24 tools), 3 custom MCP servers, paid Nostr MCP gateway, security policy engine, container Dockerfile additions (whisper.cpp, ffmpeg, OpenCode runtime), and ~15 non-standard subsystems totaling ~9,000 lines of customization. Standard `/update-nanoclaw` (merge-based) would produce hundreds of conflicts; intent-based migration is the right approach.
+This is a deep fork. Customizations span 5 entirely-new channel adapters, X-integration v2 (24 tools, +1 tool as of the 2026-07-22 update), 3 custom MCP servers, paid Nostr MCP gateway, security policy engine (currently unused/dormant — see Skill Interactions), a new Passport approval-gate subsystem (2026-07-22 update), container Dockerfile additions (whisper.cpp, ffmpeg, OpenCode runtime), and ~15 non-standard subsystems totaling ~9,000 lines of customization (base) + ~5,900 lines (2026-07-22 update). Standard `/update-nanoclaw` (merge-based) would produce hundreds of conflicts; intent-based migration is the right approach.
 
 ## Migration plan
 
@@ -38,6 +43,15 @@ Order of operations for the Upgrade phase (`.upgrade-worktree/`):
 10. **Run `pnpm run build && pnpm test`** to verify host
 11. **Validate** the new install runs cleanly against existing `groups/`, `data/`, `store/`, `.env`
 
+### Steps 12+ added 2026-07-22 (sections 07–10 — apply after step 11 above)
+
+12. **Add new dependencies** (see `10-scheduling-and-deps.md`): `@noble/curves`, `@modelcontextprotocol/sdk`, `nostr-tools`, `openai`, `ws`, `zod`, `playwright-core`, `@types/ws`.
+13. **Apply the scheduling empty-string recurrence guard** (`10-scheduling-and-deps.md`) — low risk, no dependencies on anything else in this list.
+14. **Apply the Dockerfile pnpm11 PATH fix and agent-runner reliability fixes** (`08-agent-runner-reliability.md`) — the Claude-binary-path fix (§3) depends on the Dockerfile fix landing first (same PATH change relocates the binary both fixes reference).
+15. **Apply the Passport approval-gate subsystem** (`07-passport-approval-gates.md`) — Part A (core primitives) before Part B (tool integrations & OneCLI wiring). Resolve the vendored `groups/main/projects/keyos-authorization/` dependency for `canonical.ts`/`verify.ts` before porting (see the gotcha in that section) — do this early since it blocks the passport test suite.
+16. **Apply misc customizations** (`09-misc-customizations-jul2026.md`) — x_delete_tweet guard, Signal UUID routing fix, Moltbook credential rewrite, wiki skill, AGENTS.md. Independent of everything else in this list; can be done in any order, including in parallel with steps 12–15.
+17. **Re-run `pnpm run build && pnpm test`** and `./container/build.sh` (container files changed again in steps 14–16).
+
 ## Sections
 
 | File | Contents |
@@ -48,6 +62,14 @@ Order of operations for the Upgrade phase (`.upgrade-worktree/`):
 | `04-source-customizations.md` | Host-side `src/` customizations file by file |
 | `05-container-customizations.md` | `container/` customizations file by file |
 | `06-config-and-env.md` | New config.ts exports + required .env vars |
+| `07-passport-approval-gates.md` | *(added 2026-07-22)* Passport Tier-1/Tier-2 credentialed-action approval-gate subsystem — core primitives + tool wiring |
+| `08-agent-runner-reliability.md` | *(added 2026-07-22)* Hallucination filter, silent-turn fallback, Claude binary path fix, opencode vision fix |
+| `09-misc-customizations-jul2026.md` | *(added 2026-07-22)* x_delete_tweet guard, Signal UUID routing fix, Moltbook credential rewrite, wiki skill, AGENTS.md, misc scripts |
+| `10-scheduling-and-deps.md` | *(added 2026-07-22)* Recurrence empty-string guard, new dependencies, Dockerfile pnpm11 PATH fix |
+
+## Skill Interactions
+
+**Passport vs. `security-policy.ts`** *(checked 2026-07-22, no conflict)*: the base guide's `security-policy.ts` (container-side tool/bash/WebFetch whitelisting engine, see `04-source-customizations.md`/`06-config-and-env.md`) and the new Passport Tier-2 gate (`src/modules/approvals/passport/tier2.ts`, host-side, gates mutating HTTP calls at the OneCLI callback) operate at different layers and don't overlap. `security-policy.ts`'s exported functions (`buildContainerSecurityRules`, `buildAllowedTools`, etc.) are currently **unused** — nothing in the codebase calls them — so there's nothing live to conflict with. No env var collisions (`SECURITY_POLICY_PATH` vs. `PASSPORT_TIER2_ENFORCE`/`PASSPORT_GATED_HOSTS` — distinct names). Apply both guides' sections in either order; Passport's `onecli-approvals.ts` wrapper (`07-passport-approval-gates.md` Part B §1) is additive to whatever that file looks like after the base guide's `04-source-customizations.md` is applied.
 
 ## Critical risks for the Upgrade phase
 
