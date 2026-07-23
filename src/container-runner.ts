@@ -465,7 +465,7 @@ async function buildContainerArgs(
   containerName: string,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
-  _provider: string,
+  provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
@@ -508,14 +508,23 @@ async function buildContainerArgs(
   // mounts) handles credential injection for everything else. `host.docker.internal`
   // resolves via hostGatewayArgs()'s --add-host mapping in the default (non-lockdown)
   // bridge-networking path above — no per-platform IP rewrite needed anymore.
-  const authMode = detectAuthMode();
-  args.push('-e', `ANTHROPIC_BASE_URL=http://host.docker.internal:${CREDENTIAL_PROXY_PORT}`);
-  args.push('-e', 'NO_PROXY=api.anthropic.com,localhost,127.0.0.1');
-  args.push('-e', 'no_proxy=api.anthropic.com,localhost,127.0.0.1');
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
-  } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder-oauth-token');
+  //
+  // Claude-provider only: OpenCode (and any other non-Claude provider) reads
+  // ANTHROPIC_BASE_URL itself as a generic override for ALL model calls when
+  // present, regardless of the configured provider/baseURL — so injecting it
+  // unconditionally silently breaks every non-Claude provider's requests by
+  // routing them into this Claude-only proxy (confirmed 2026-07-23: OpenCode's
+  // "ollama" provider calls were going to this proxy port instead of Ollama).
+  if (provider === 'claude') {
+    const authMode = detectAuthMode();
+    args.push('-e', `ANTHROPIC_BASE_URL=http://host.docker.internal:${CREDENTIAL_PROXY_PORT}`);
+    args.push('-e', 'NO_PROXY=api.anthropic.com,localhost,127.0.0.1');
+    args.push('-e', 'no_proxy=api.anthropic.com,localhost,127.0.0.1');
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder-oauth-token');
+    }
   }
 
   // User mapping

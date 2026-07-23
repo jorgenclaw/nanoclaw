@@ -175,6 +175,28 @@ function maybeWipeOnModelChange(
  *   3. If neither apply (no host config, no model env), leave the dir
  *      empty — opencode falls back to whatever defaults it shipped with.
  */
+/**
+ * The host's own opencode.json (and the auto-generated fallback below) point
+ * Ollama's baseURL at 127.0.0.1 — correct for the host process and for the
+ * container back when it ran in --network host mode. Under the current
+ * bridge-networking + --add-host=host.docker.internal setup, 127.0.0.1 inside
+ * the container is the container's own loopback, not the host — Ollama isn't
+ * there, so every model request fails ("model not found" / ProviderModelNotFoundError)
+ * even though the model genuinely exists on the host. Rewrite every
+ * provider.*.options.baseURL host segment to host.docker.internal before
+ * writing the container's copy; the host's own file on disk is untouched.
+ */
+function rewriteBaseUrlsForContainer(raw: string): string {
+  const parsed = JSON.parse(raw) as { provider?: Record<string, { options?: { baseURL?: string } }> };
+  for (const providerConfig of Object.values(parsed.provider ?? {})) {
+    const baseURL = providerConfig.options?.baseURL;
+    if (typeof baseURL === 'string') {
+      providerConfig.options!.baseURL = baseURL.replace(/(127\.0\.0\.1|localhost)(?=[:/]|$)/g, 'host.docker.internal');
+    }
+  }
+  return JSON.stringify(parsed, null, 2);
+}
+
 function writeOpencodeConfig(opencodeDir: string, currentModel: string | undefined): void {
   const configDir = path.join(opencodeDir, 'opencode');
   fs.mkdirSync(configDir, { recursive: true });
@@ -185,7 +207,7 @@ function writeOpencodeConfig(opencodeDir: string, currentModel: string | undefin
     try {
       const raw = fs.readFileSync(hostUserConfig, 'utf8');
       JSON.parse(raw); // validate
-      fs.writeFileSync(configPath, raw);
+      fs.writeFileSync(configPath, rewriteBaseUrlsForContainer(raw));
       return;
     } catch (err) {
       log.warn('Failed to copy host opencode.json — falling back to generated', {
@@ -209,7 +231,9 @@ function writeOpencodeConfig(opencodeDir: string, currentModel: string | undefin
         npm: '@ai-sdk/openai-compatible',
         name: 'Ollama (auto-generated)',
         options: {
-          baseURL: 'http://127.0.0.1:11434/v1',
+          // See rewriteBaseUrlsForContainer's comment above: the container
+          // reaches the host via host.docker.internal, never 127.0.0.1.
+          baseURL: 'http://host.docker.internal:11434/v1',
         },
         models: {
           [modelId]: {
@@ -237,8 +261,8 @@ registerProviderContainerConfig('opencode', (ctx) => {
   const env: Record<string, string> = {
     XDG_DATA_HOME: '/opencode-xdg',
     XDG_CONFIG_HOME: '/opencode-xdg',
-    NO_PROXY: mergeNoProxy(ctx.hostEnv.NO_PROXY, '127.0.0.1,localhost'),
-    no_proxy: mergeNoProxy(ctx.hostEnv.no_proxy, '127.0.0.1,localhost'),
+    NO_PROXY: mergeNoProxy(ctx.hostEnv.NO_PROXY, '127.0.0.1,localhost,host.docker.internal'),
+    no_proxy: mergeNoProxy(ctx.hostEnv.no_proxy, '127.0.0.1,localhost,host.docker.internal'),
   };
   for (const key of ['OPENCODE_PROVIDER', 'OPENCODE_MODEL', 'OPENCODE_SMALL_MODEL'] as const) {
     const value = (ctx.containerEnv ?? {})[key] ?? ctx.hostEnv[key];

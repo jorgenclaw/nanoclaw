@@ -95,7 +95,7 @@ const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 
 /** Stale / dead OpenCode session heuristics (complement Claude-centric host patterns). */
 const STALE_SESSION_RE =
-  /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
+  /no conversation found|ENOENT.*\.jsonl|session.*not found|not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
 
 function killProcessTree(proc: ChildProcess): void {
   if (!proc.pid) return;
