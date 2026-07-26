@@ -48,9 +48,12 @@ export async function getCredentialProxyHost(): Promise<string> {
     const ip = stdout.trim();
     if (ip) return ip;
   } catch (err) {
-    log.warn('Credential proxy: could not determine docker bridge gateway — falling back to 127.0.0.1 (unreachable from containers)', {
-      err: (err as Error).message,
-    });
+    log.warn(
+      'Credential proxy: could not determine docker bridge gateway — falling back to 127.0.0.1 (unreachable from containers)',
+      {
+        err: (err as Error).message,
+      },
+    );
   }
   return '127.0.0.1';
 }
