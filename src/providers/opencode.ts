@@ -111,7 +111,17 @@ function computeModelFingerprint(currentModel: string): string {
       timeout: 30000,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    const digest = crypto.createHash('sha256').update(modelfile).digest('hex').slice(0, 16);
+    // `ollama show --modelfile` iterates the Modelfile's PARAMETER map in Go's
+    // randomized map order, so consecutive calls on the SAME model emit the same
+    // lines in a DIFFERENT order (confirmed 2026-07-26: two back-to-back calls
+    // produced different PARAMETER orderings). Hashing the raw text made the
+    // fingerprint change on essentially every cache-miss (e.g. every host
+    // restart), which falsely looked like a model change, wiped the live
+    // OpenCode session mid-conversation, and surfaced a raw "NotFoundError" to
+    // the user on their next message. Sort lines before hashing so the digest
+    // only changes when the actual line set changes, not its order.
+    const canonical = modelfile.split('\n').sort().join('\n');
+    const digest = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
     const fingerprint = `${currentModel}|${digest}`;
     fingerprintCache.set(currentModel, fingerprint);
     return fingerprint;

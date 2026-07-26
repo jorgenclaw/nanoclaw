@@ -171,7 +171,7 @@ async function main(): Promise<void> {
       log.error(text);
     },
   });
-  startCredentialProxy(CREDENTIAL_PROXY_PORT, '127.0.0.1').catch((err) => {
+  startCredentialProxy(CREDENTIAL_PROXY_PORT).catch((err) => {
     log.error('Credential proxy failed to start', { err });
   });
   if (MCP_SERVER_ENABLED) {
