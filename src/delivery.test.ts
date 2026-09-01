@@ -36,7 +36,7 @@ import {
 } from './db/index.js';
 import { getDeliveredIds } from './db/session-db.js';
 import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
-import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
+import { deliverSessionMessages, setDeliveryAdapter, DRAIN_WATCHDOG_MS } from './delivery.js';
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 
 function now(): string {
@@ -252,6 +252,68 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Attempt 3 — not called, message already delivered
     await deliverSessionMessages(session);
     expect(callCount).toBe(2);
+  });
+});
+
+describe('deliverSessionMessages — drain watchdog', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('releases the session lock if the adapter call never settles, and logs it', async () => {
+    // Regression for a production wedge (2026-07-29, recurred 2026-09-01,
+    // same session both times): a delivery that never resolves or rejects
+    // held inflightDeliveries forever, silently starving that session (and,
+    // because pollActive/pollSweep await sessions serially in one loop,
+    // every OTHER session too) of delivery until the host was restarted by
+    // hand. The watchdog must force the lock open again after DRAIN_WATCHDOG_MS.
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-hang');
+
+    setDeliveryAdapter({
+      deliver() {
+        return new Promise<string | undefined>(() => {}); // never settles
+      },
+    });
+
+    vi.useFakeTimers();
+    const errorSpy = vi.spyOn(await import('./log.js').then((m) => m.log), 'error');
+
+    const call = deliverSessionMessages(session);
+    await vi.advanceTimersByTimeAsync(DRAIN_WATCHDOG_MS + 1000);
+    await call;
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Delivery drain watchdog fired — drainSession did not settle in time, releasing session lock so the next poll can retry. ' +
+        'If the stuck drain eventually resolves in the background it is harmless (its own finally closes the DB handles); ' +
+        'if it never does, this session may briefly double-send once it catches up.',
+      expect.objectContaining({ sessionId: session.id }),
+    );
+
+    vi.useRealTimers();
+
+    // The lock must be released — a fresh message on the same session
+    // delivers normally through a working adapter, proving the loop isn't
+    // permanently starved by the earlier hang. The still-orphaned first
+    // drain never marked 'out-hang' delivered, so this retry also picks it
+    // back up and redelivers it — the stuck message isn't lost, just late.
+    insertOutbound('ag-1', session.id, 'out-after-hang');
+    let calls = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        calls++;
+        return 'plat-recovered';
+      },
+    });
+    await deliverSessionMessages(session);
+    expect(calls).toBe(2);
+
+    const inDb = openInboundDb('ag-1', session.id);
+    const delivered = getDeliveredIds(inDb);
+    inDb.close();
+    expect(delivered.has('out-hang')).toBe(true);
+    expect(delivered.has('out-after-hang')).toBe(true);
   });
 });
 

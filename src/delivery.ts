@@ -40,6 +40,20 @@ const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
 
+/**
+ * Upper bound on a single drainSession() call. Backstop for a wedge seen in
+ * production (2026-07-29, recurred 2026-09-01, same session both times):
+ * drainSession never settled — no error, no log line, nothing — leaving
+ * inflightDeliveries permanently held for that session and silently
+ * starving it of all future delivery polls until the host was restarted by
+ * hand. The exact hang was never pinned down live (every awaited call on
+ * the path, including signal.ts's sendRpc, has its own timeout that should
+ * reject on its own), so this is a defensive ceiling rather than a fix for
+ * a known cause: whatever hangs, the session gets its lock back and a log
+ * line pointing at it, instead of staying wedged forever.
+ */
+export const DRAIN_WATCHDOG_MS = 120_000;
+
 /** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
 const deliveryAttempts = new Map<string, number>();
 
@@ -55,6 +69,9 @@ const deliveryAttempts = new Map<string, number>();
  *
  * Skipping (vs. queueing) is correct: any message left over when the
  * second caller skips will be picked up on the next poll tick (~1s).
+ *
+ * Held for at most DRAIN_WATCHDOG_MS — see its comment. Without that
+ * backstop, a drainSession() call that never settles holds this forever.
  */
 const inflightDeliveries = new Set<string>();
 
@@ -166,10 +183,36 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
   if (inflightDeliveries.has(session.id)) return;
   inflightDeliveries.add(session.id);
 
+  // Attach the catch immediately so a drain that finishes late (after the
+  // watchdog already gave up on it below) can never surface as an unhandled
+  // rejection — it just logs and is otherwise ignored.
+  const drainPromise = drainSession(session).catch((err) => {
+    log.error('drainSession threw', { sessionId: session.id, err });
+  });
+
+  let timedOut = false;
+  let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+  const watchdog = new Promise<void>((resolve) => {
+    watchdogTimer = setTimeout(() => {
+      timedOut = true;
+      resolve();
+    }, DRAIN_WATCHDOG_MS);
+  });
+
   try {
-    await drainSession(session);
+    await Promise.race([drainPromise, watchdog]);
   } finally {
+    clearTimeout(watchdogTimer);
     inflightDeliveries.delete(session.id);
+  }
+
+  if (timedOut) {
+    log.error(
+      'Delivery drain watchdog fired — drainSession did not settle in time, releasing session lock so the next poll can retry. ' +
+        'If the stuck drain eventually resolves in the background it is harmless (its own finally closes the DB handles); ' +
+        'if it never does, this session may briefly double-send once it catches up.',
+      { sessionId: session.id, timeoutMs: DRAIN_WATCHDOG_MS },
+    );
   }
 }
 
