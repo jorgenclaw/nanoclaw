@@ -65,6 +65,8 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
+    env: row.env ? (JSON.parse(row.env) as Record<string, string>) : undefined,
+    blockedHosts: row.blocked_hosts ? (JSON.parse(row.blocked_hosts) as string[]) : undefined,
   };
 }
 

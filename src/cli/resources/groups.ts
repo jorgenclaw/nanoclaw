@@ -33,6 +33,8 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    env: JSON.parse(row.env),
+    blocked_hosts: JSON.parse(row.blocked_hosts),
     updated_at: row.updated_at,
   };
 }
@@ -256,7 +258,8 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--env <json-object> (replaces the whole env map — merge client-side if you only want to change one key; read the current value with `config get` first).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -284,13 +287,19 @@ registerResource({
           updates.cli_scope = scope;
         }
 
-        if (Object.keys(updates).length === 0) {
+        let envUpdate: Record<string, string> | undefined;
+        if (args.env !== undefined) {
+          envUpdate = JSON.parse(args.env as string) as Record<string, string>;
+        }
+
+        if (Object.keys(updates).length === 0 && envUpdate === undefined) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --env',
           );
         }
 
-        updateContainerConfigScalars(id, updates);
+        if (Object.keys(updates).length > 0) updateContainerConfigScalars(id, updates);
+        if (envUpdate !== undefined) updateContainerConfigJson(id, 'env', envUpdate);
 
         const updated = getContainerConfig(id)!;
         return presentConfig(updated);
