@@ -46,3 +46,6 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+
+# Nested standalone repo (own .git), not part of the NanoClaw tree
+/nostr-mcp-server/
