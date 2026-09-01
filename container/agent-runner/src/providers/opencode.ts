@@ -242,6 +242,20 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
     '/workspace/agent/CLAUDE.local.md',
   ];
 
+  // QUAD_INBOX_WRITER.md is a plain top-level file, not a fragment or
+  // CLAUDE.local.md itself, so it's invisible to the instructions list above
+  // unless a group happens to have one. Under Claude, the model reliably
+  // follows CLAUDE.local.md's "read that file before filing a task"
+  // pointer; smaller local models are much less consistent about chasing an
+  // indirect file reference mid-conversation, so the full writer spec
+  // silently never enters context and tasks come out malformed or never get
+  // written at all. Load it directly, same as CLAUDE.local.md, whenever the
+  // group actually has one — this is a no-op for groups (e.g. non-Jorgenclaw
+  // agent groups) that don't ship this file.
+  if (fs.existsSync('/workspace/agent/QUAD_INBOX_WRITER.md')) {
+    instructions.push('/workspace/agent/QUAD_INBOX_WRITER.md');
+  }
+
   return {
     ...(model ? { model } : {}),
     ...(smallModel ? { small_model: smallModel } : {}),
@@ -290,6 +304,17 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
     const client = createOpencodeClient({ baseUrl: url });
     const sub = await client.event.subscribe();
     const stream = sub.stream as AsyncGenerator<{ type: string; properties: Record<string, unknown> }, void, void>;
+    // `client.event.subscribe()` returns a lazy generator — the actual GET
+    // /event SSE connection doesn't open until the first `stream.next()`
+    // call. Without priming it here, the first real caller only connects
+    // *after* issuing `promptAsync`, so a prompt that fails synchronously
+    // fast (e.g. NotFoundError on a stale/invalid session) publishes its
+    // `session.error` bus event before anyone is listening — the event is
+    // lost forever and the query hangs until the 5-minute idle timeout.
+    // Priming consumes the harmless first `server.connected` event (already
+    // filtered by the normal consumption loop below), guaranteeing the
+    // connection is live before any prompt is ever sent.
+    await stream.next();
     sharedRuntime = {
       proc,
       client,
@@ -434,121 +459,132 @@ export class OpenCodeProvider implements AgentProvider {
 
         const partTextByMessageId = new Map<string, string>();
         const roleByMessageId = new Map<string, string>();
-        let lastEventAt = Date.now();
-        let eventTimedOut = false;
-        const timeoutCheck = setInterval(() => {
-          if (Date.now() - lastEventAt > IDLE_TIMEOUT_MS) {
+
+        // A wedged OpenCode/model backend can leave `stream.next()` pending
+        // forever — no more events ever arrive, but the awaited promise
+        // never settles either. Checking elapsed time on an interval doesn't
+        // help in that case: there's no next loop iteration to notice the
+        // check until stream.next() resolves, so the timeout is never
+        // actually observed and the container just burns inference time
+        // until the host's absolute-ceiling SIGKILL (which then respawns
+        // and resumes the same wedged session, repeating forever). Race the
+        // read itself against the timeout so idleness is caught even when
+        // the stream truly never delivers another event.
+        turn: while (true) {
+          if (aborted) return;
+
+          const nextEvent = stream.next();
+          let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+          const idle = new Promise<'idle'>((resolve) => {
+            timeoutHandle = setTimeout(() => resolve('idle'), IDLE_TIMEOUT_MS);
+          });
+
+          const raced = await Promise.race([nextEvent, idle]);
+          clearTimeout(timeoutHandle);
+
+          if (raced === 'idle') {
             log(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms) — clearing session ${sessionId}`);
-            eventTimedOut = true;
             self.activeSessionId = undefined;
             destroySharedRuntime();
-            kick();
+            // The abandoned read settles once the process above is killed
+            // (resolve or reject) — nothing awaits it, so swallow any
+            // eventual rejection to avoid an unhandled promise rejection.
+            nextEvent.catch(() => {});
+            throw new Error(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms)`);
           }
-        }, 5000);
 
-        try {
-          turn: while (true) {
-            if (aborted) return;
-            if (eventTimedOut) {
-              throw new Error(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms)`);
-            }
-
-            const { value: ev, done } = await stream.next();
-            if (done) {
-              throw new Error('OpenCode SSE stream ended unexpectedly');
-            }
-
-            if (!ev?.type || ev.type === 'server.connected' || ev.type === 'server.heartbeat') continue;
-
-            lastEventAt = Date.now();
-            yield { type: 'activity' };
-
-            switch (ev.type) {
-              case 'message.updated': {
-                const info = ev.properties.info as { id?: string; role?: string } | undefined;
-                if (info?.id && info?.role) {
-                  roleByMessageId.set(info.id, info.role);
-                }
-                break;
-              }
-              case 'message.part.updated': {
-                const part = ev.properties.part as { type?: string; messageID?: string; text?: string } | undefined;
-                if (part?.type === 'text' && part.messageID && part.text) {
-                  partTextByMessageId.set(part.messageID, part.text);
-                }
-                break;
-              }
-              case 'permission.updated': {
-                // OpenCode emits permission events for each tool call. We
-                // auto-reply 'always' for normal permissions (no human at the
-                // keyboard to answer), but DENY 'doom_loop' permissions —
-                // OpenCode sets this when it detects the model retrying the
-                // same tool with no progress. Letting the loop continue burns
-                // tokens/inference time and never recovers; denying forces the
-                // model to stop and summarize what it knows.
-                const perm = ev.properties as {
-                  id?: string;
-                  sessionID?: string;
-                  permission?: string;
-                  type?: string;
-                };
-                if (perm.sessionID === sessionId && perm.id) {
-                  const permType = perm.permission ?? perm.type;
-                  const isDoomLoop = permType === 'doom_loop';
-                  const response = isDoomLoop ? ('reject' as const) : ('always' as const);
-                  if (isDoomLoop) {
-                    log(`Doom-loop detected (permission ${perm.id}) — denying to break the loop`);
-                  }
-                  try {
-                    await client.postSessionIdPermissionsPermissionId({
-                      path: { id: sessionId, permissionID: perm.id },
-                      body: { response },
-                    });
-                  } catch (err) {
-                    log(`Failed to auto-reply permission: ${err instanceof Error ? err.message : String(err)}`);
-                  }
-                }
-                break;
-              }
-              case 'session.status': {
-                const props = ev.properties as {
-                  sessionID?: string;
-                  status?: { type?: string; attempt?: number; message?: string };
-                };
-                if (props.sessionID !== sessionId) break;
-                const st = props.status;
-                if (
-                  st?.type === 'retry' &&
-                  typeof st.attempt === 'number' &&
-                  st.attempt >= SESSION_STATUS_RETRY_ERROR_AFTER &&
-                  st.message
-                ) {
-                  self.activeSessionId = undefined;
-                  throw new Error(`OpenCode retry limit (${st.attempt}): ${st.message}`);
-                }
-                break;
-              }
-              case 'session.error': {
-                const props = ev.properties as { sessionID?: string; error?: unknown };
-                if (props.sessionID === sessionId || props.sessionID === undefined) {
-                  self.activeSessionId = undefined;
-                  throw new Error(sessionErrorMessage(props));
-                }
-                break;
-              }
-              case 'session.idle': {
-                const sid = (ev.properties as { sessionID?: string }).sessionID;
-                if (sid === sessionId) {
-                  break turn;
-                }
-                break;
-              }
-              default:
-                break;
-            }
+          const { value: ev, done } = raced;
+          if (done) {
+            throw new Error('OpenCode SSE stream ended unexpectedly');
           }
-        } finally {
-          clearInterval(timeoutCheck);
+
+          if (!ev?.type || ev.type === 'server.connected' || ev.type === 'server.heartbeat') continue;
+
+          yield { type: 'activity' };
+
+          switch (ev.type) {
+            case 'message.updated': {
+              const info = ev.properties.info as { id?: string; role?: string } | undefined;
+              if (info?.id && info?.role) {
+                roleByMessageId.set(info.id, info.role);
+              }
+              break;
+            }
+            case 'message.part.updated': {
+              const part = ev.properties.part as { type?: string; messageID?: string; text?: string } | undefined;
+              if (part?.type === 'text' && part.messageID && part.text) {
+                partTextByMessageId.set(part.messageID, part.text);
+              }
+              break;
+            }
+            case 'permission.updated': {
+              // OpenCode emits permission events for each tool call. We
+              // auto-reply 'always' for normal permissions (no human at the
+              // keyboard to answer), but DENY 'doom_loop' permissions —
+              // OpenCode sets this when it detects the model retrying the
+              // same tool with no progress. Letting the loop continue burns
+              // tokens/inference time and never recovers; denying forces the
+              // model to stop and summarize what it knows.
+              const perm = ev.properties as {
+                id?: string;
+                sessionID?: string;
+                permission?: string;
+                type?: string;
+              };
+              if (perm.sessionID === sessionId && perm.id) {
+                const permType = perm.permission ?? perm.type;
+                const isDoomLoop = permType === 'doom_loop';
+                const response = isDoomLoop ? ('reject' as const) : ('always' as const);
+                if (isDoomLoop) {
+                  log(`Doom-loop detected (permission ${perm.id}) — denying to break the loop`);
+                }
+                try {
+                  await client.postSessionIdPermissionsPermissionId({
+                    path: { id: sessionId, permissionID: perm.id },
+                    body: { response },
+                  });
+                } catch (err) {
+                  log(`Failed to auto-reply permission: ${err instanceof Error ? err.message : String(err)}`);
+                }
+              }
+              break;
+            }
+            case 'session.status': {
+              const props = ev.properties as {
+                sessionID?: string;
+                status?: { type?: string; attempt?: number; message?: string };
+              };
+              if (props.sessionID !== sessionId) break;
+              const st = props.status;
+              if (
+                st?.type === 'retry' &&
+                typeof st.attempt === 'number' &&
+                st.attempt >= SESSION_STATUS_RETRY_ERROR_AFTER &&
+                st.message
+              ) {
+                self.activeSessionId = undefined;
+                throw new Error(`OpenCode retry limit (${st.attempt}): ${st.message}`);
+              }
+              break;
+            }
+            case 'session.error': {
+              const props = ev.properties as { sessionID?: string; error?: unknown };
+              if (props.sessionID === sessionId || props.sessionID === undefined) {
+                self.activeSessionId = undefined;
+                throw new Error(sessionErrorMessage(props));
+              }
+              break;
+            }
+            case 'session.idle': {
+              const sid = (ev.properties as { sessionID?: string }).sessionID;
+              if (sid === sessionId) {
+                break turn;
+              }
+              break;
+            }
+            default:
+              break;
+          }
         }
 
         let resultText = '';
