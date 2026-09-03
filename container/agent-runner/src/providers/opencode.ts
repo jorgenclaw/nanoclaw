@@ -238,6 +238,7 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
   // by OpenCode, so point at the concrete files, not at composed CLAUDE.md.
   const instructions = [
     '/app/CLAUDE.md',
+    '/app/opencode-notes.md',
     '/workspace/agent/.claude-fragments/*.md',
     '/workspace/agent/CLAUDE.local.md',
   ];

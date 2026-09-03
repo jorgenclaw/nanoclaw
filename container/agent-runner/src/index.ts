@@ -36,6 +36,34 @@ import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import { runPollLoop } from './poll-loop.js';
 
+/**
+ * container.json's mcpServers.<name>.env can reference the container's own
+ * process env via `${VAR_NAME}` placeholders (e.g. Proton Bridge auth, kept
+ * out of the DB-persisted config so the plaintext secret isn't duplicated
+ * there). Nothing downstream resolves these — providers pass the env map
+ * straight through to the MCP subprocess — so without this step the
+ * subprocess receives the literal, unexpanded string as its credential.
+ * Resolve here, the single point every provider's mcpServers config flows
+ * through before spawn.
+ */
+function resolveEnvPlaceholders(env: Record<string, string>): Record<string, string> {
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    const match = /^\$\{([A-Z0-9_]+)\}$/.exec(value);
+    if (!match) {
+      resolved[key] = value;
+      continue;
+    }
+    const resolvedValue = process.env[match[1]];
+    if (resolvedValue === undefined) {
+      log(`Warning: MCP env placeholder ${value} has no matching process env var — leaving unset`);
+      continue;
+    }
+    resolved[key] = resolvedValue;
+  }
+  return resolved;
+}
+
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
 }
@@ -93,7 +121,7 @@ async function main(): Promise<void> {
   };
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-    mcpServers[name] = serverConfig;
+    mcpServers[name] = { ...serverConfig, env: resolveEnvPlaceholders(serverConfig.env) };
     log(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
 

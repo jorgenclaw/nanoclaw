@@ -337,6 +337,14 @@ export function buildMounts(
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }
 
+  // OpenCode-specific tool notes — read-only, pulled into the instructions
+  // array unconditionally by the opencode provider (container path is fixed;
+  // harmless no-op for other providers since nothing references it there).
+  const opencodeNotes = path.join(process.cwd(), 'container', 'opencode-notes.md');
+  if (defaultSurfaces && fs.existsSync(opencodeNotes)) {
+    mounts.push({ hostPath: opencodeNotes, containerPath: '/app/opencode-notes.md', readonly: true });
+  }
+
   // Per-group .claude-shared at /home/node/.claude (Claude state, settings,
   // skill symlinks)
   if (defaultSurfaces) {
