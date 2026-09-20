@@ -22,3 +22,4 @@ import './permissions/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './x-integration/index.js';
+import './matrix-rooms/index.js';

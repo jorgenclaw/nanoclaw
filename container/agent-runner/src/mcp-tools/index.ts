@@ -8,6 +8,7 @@
 import './core.js';
 import './interactive.js';
 import './agents.js';
+import './matrix-rooms.js';
 import './self-mod.js';
 import './contacts.js';
 import './transcription.js';
