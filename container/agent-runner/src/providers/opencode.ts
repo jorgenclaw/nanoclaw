@@ -9,6 +9,7 @@ import { memoryContextForSessionStart, type MemorySessionHookRegistration } from
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
+import { CONTEXT_OVERFLOW_USER_MESSAGE, isContextOverflowError } from './opencode-overflow.js';
 
 /**
  * Detect `[Image: <absolute-path>]` markers in user-message text and convert
@@ -460,6 +461,14 @@ export class OpenCodeProvider implements AgentProvider {
 
         const partTextByMessageId = new Map<string, string>();
         const roleByMessageId = new Map<string, string>();
+        // Compaction summaries are assistant messages full of text that must
+        // never be mistaken for the turn's reply.
+        const summaryMessageIds = new Set<string>();
+        // Context overflow: OpenCode reports the error, then compacts the
+        // session and finishes the turn itself. Track it so we wait for that
+        // instead of failing the turn (see opencode-overflow.ts).
+        let overflowSeen = false;
+        let compacted = false;
 
         // A wedged OpenCode/model backend can leave `stream.next()` pending
         // forever — no more events ever arrive, but the awaited promise
@@ -505,9 +514,10 @@ export class OpenCodeProvider implements AgentProvider {
 
           switch (ev.type) {
             case 'message.updated': {
-              const info = ev.properties.info as { id?: string; role?: string } | undefined;
+              const info = ev.properties.info as { id?: string; role?: string; summary?: unknown } | undefined;
               if (info?.id && info?.role) {
                 roleByMessageId.set(info.id, info.role);
+                if (info.role === 'assistant' && info.summary === true) summaryMessageIds.add(info.id);
               }
               break;
             }
@@ -571,14 +581,38 @@ export class OpenCodeProvider implements AgentProvider {
             case 'session.error': {
               const props = ev.properties as { sessionID?: string; error?: unknown };
               if (props.sessionID === sessionId || props.sessionID === undefined) {
+                if (isContextOverflowError(props.error)) {
+                  log(`Context overflow: ${sessionErrorMessage(props)}`);
+                  if (!overflowSeen) {
+                    // First overflow this turn: OpenCode compacts and carries
+                    // on by itself, so keep reading events until it goes idle.
+                    overflowSeen = true;
+                    break;
+                  }
+                  // Overflowed again after compacting — give up.
+                  self.activeSessionId = undefined;
+                  throw new Error(CONTEXT_OVERFLOW_USER_MESSAGE);
+                }
                 self.activeSessionId = undefined;
                 throw new Error(sessionErrorMessage(props));
               }
               break;
             }
+            case 'session.compacted': {
+              const sid = (ev.properties as { sessionID?: string }).sessionID;
+              if (sid === sessionId) compacted = true;
+              break;
+            }
             case 'session.idle': {
               const sid = (ev.properties as { sessionID?: string }).sessionID;
               if (sid === sessionId) {
+                if (overflowSeen && !compacted) {
+                  // Idle after an overflow with no compaction: nothing
+                  // recovered the turn, and an empty result would look like
+                  // silence. Tell the user instead.
+                  self.activeSessionId = undefined;
+                  throw new Error(CONTEXT_OVERFLOW_USER_MESSAGE);
+                }
                 break turn;
               }
               break;
@@ -590,7 +624,7 @@ export class OpenCodeProvider implements AgentProvider {
 
         let resultText = '';
         for (const [msgId, role] of roleByMessageId) {
-          if (role === 'assistant') {
+          if (role === 'assistant' && !summaryMessageIds.has(msgId)) {
             resultText = partTextByMessageId.get(msgId) ?? resultText;
           }
         }
