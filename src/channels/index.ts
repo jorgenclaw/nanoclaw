@@ -12,3 +12,5 @@ import './signal.js';
 import './watch.js';
 import './whitenoise.js';
 import './nostr-dm.js';
+
+import './matrix.js';
