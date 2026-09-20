@@ -18,7 +18,11 @@ import path from 'path';
 
 import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getContainerConfig } from '../../db/container-configs.js';
+import {
+  getContainerConfig,
+  updateContainerConfigJson,
+  updateContainerConfigScalars,
+} from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { initGroupFilesystem } from '../../group-init.js';
@@ -88,6 +92,39 @@ export async function createAgent(content: Record<string, unknown>, session: Ses
 }
 
 /**
+ * Env keys that choose WHICH model a provider runs. A child needs them: without
+ * them OpenCode has no model to load, falls back to a placeholder, and every
+ * reply is "Model not found" (seen 2026-09-20 with the coder and social agents).
+ * An allowlist on purpose: the parent's env can hold credentials, which must
+ * never reach a child just because it was created.
+ */
+const MODEL_ENV_KEYS = ['OPENCODE_PROVIDER', 'OPENCODE_MODEL', 'OPENCODE_SMALL_MODEL'] as const;
+
+/** Give a new child its creator's model choice, so it runs on the same model as its parent. */
+function inheritModelSettings(parentId: string, childId: string): void {
+  const parent = getContainerConfig(parentId);
+  if (!parent) return;
+
+  if (parent.model) updateContainerConfigScalars(childId, { model: parent.model });
+
+  let parentEnv: unknown;
+  try {
+    parentEnv = JSON.parse(parent.env || '{}');
+  } catch {
+    log.warn('create_agent: creator env is not valid JSON, child gets no model env', { parentId, childId });
+    return;
+  }
+  if (!parentEnv || typeof parentEnv !== 'object') return;
+
+  const inherited: Record<string, string> = {};
+  for (const key of MODEL_ENV_KEYS) {
+    const value = (parentEnv as Record<string, unknown>)[key];
+    if (typeof value === 'string' && value) inherited[key] = value;
+  }
+  if (Object.keys(inherited).length > 0) updateContainerConfigJson(childId, 'env', inherited);
+}
+
+/**
  * Core creation: writes the new agent group + bidirectional destinations and
  * scaffolds its filesystem, then reports via `notify`. Authorization is the
  * CALLER's responsibility (the guard's agents.create decision) — never call
@@ -147,6 +184,8 @@ async function performCreateAgent(
   // --provider`.
   const parentProvider = getContainerConfig(sourceGroup.id)?.provider ?? 'claude';
   initGroupFilesystem(newGroup, { instructions: instructions ?? undefined, provider: parentProvider });
+  // The provider alone is not enough: the child also needs the parent's MODEL choice.
+  inheritModelSettings(sourceGroup.id, agentGroupId);
 
   // Insert bidirectional destination rows (= ACL grants).
   // Creator refers to child by the name it chose; child refers to creator as "parent".

@@ -19,6 +19,8 @@ import type { PendingApproval, Session } from '../../types.js';
 const {
   mockRequestApproval,
   mockGetContainerConfig,
+  mockUpdateScalars,
+  mockUpdateJson,
   mockCreateAgentGroup,
   mockInitGroupFilesystem,
   mockWriteDestinations,
@@ -28,6 +30,8 @@ const {
 } = vi.hoisted(() => ({
   mockRequestApproval: vi.fn().mockResolvedValue(undefined),
   mockGetContainerConfig: vi.fn(),
+  mockUpdateScalars: vi.fn(),
+  mockUpdateJson: vi.fn(),
   mockCreateAgentGroup: vi.fn(),
   mockInitGroupFilesystem: vi.fn(),
   mockWriteDestinations: vi.fn(),
@@ -46,6 +50,8 @@ vi.mock('../approvals/index.js', () => ({
 vi.mock('../../db/container-configs.js', () => ({
   getContainerConfig: (...a: unknown[]) => mockGetContainerConfig(...a),
   ensureContainerConfig: () => {},
+  updateContainerConfigScalars: (...a: unknown[]) => mockUpdateScalars(...a),
+  updateContainerConfigJson: (...a: unknown[]) => mockUpdateJson(...a),
 }));
 vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
@@ -207,6 +213,72 @@ describe('create_agent — guard-based authorization (wrapped delivery action)',
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(mockCreateAgentGroup).not.toHaveBeenCalled();
+  });
+});
+
+describe('create_agent — the child inherits its creator’s model choice', () => {
+  const childId = (): string => (mockCreateAgentGroup.mock.calls[0][0] as { id: string }).id;
+
+  it('copies the creator model and the model-selecting env keys to the child', async () => {
+    // Without these an OpenCode child has no model to load and answers every message
+    // with "Model not found" (coder/social, 2026-09-20). Red-on-delete: removing
+    // inheritModelSettings leaves both mocks uncalled.
+    mockGetContainerConfig.mockReturnValue({
+      cli_scope: 'global',
+      provider: 'opencode',
+      model: 'ollama/big-model',
+      env: JSON.stringify({
+        OPENCODE_PROVIDER: 'ollama',
+        OPENCODE_MODEL: 'ollama/big-model',
+        OPENCODE_SMALL_MODEL: 'ollama/small-model',
+      }),
+    });
+
+    await runCreateAgent({ name: 'Scout', instructions: 'help' });
+
+    expect(mockUpdateScalars).toHaveBeenCalledWith(childId(), { model: 'ollama/big-model' });
+    expect(mockUpdateJson).toHaveBeenCalledWith(childId(), 'env', {
+      OPENCODE_PROVIDER: 'ollama',
+      OPENCODE_MODEL: 'ollama/big-model',
+      OPENCODE_SMALL_MODEL: 'ollama/small-model',
+    });
+  });
+
+  it('never copies any other env key: credentials stay with the creator', async () => {
+    mockGetContainerConfig.mockReturnValue({
+      cli_scope: 'global',
+      provider: 'opencode',
+      env: JSON.stringify({
+        OPENCODE_MODEL: 'ollama/big-model',
+        PROTON_BRIDGE_PASSWORD: 'super-secret',
+        OPENCODE_SERVER_PASSWORD: 'also-secret',
+      }),
+    });
+
+    await runCreateAgent({ name: 'Scout', instructions: 'help' });
+
+    expect(mockUpdateJson).toHaveBeenCalledTimes(1);
+    expect(mockUpdateJson).toHaveBeenCalledWith(childId(), 'env', { OPENCODE_MODEL: 'ollama/big-model' });
+    expect(JSON.stringify(mockUpdateJson.mock.calls)).not.toMatch(/secret/);
+  });
+
+  it('a creator with no model settings changes nothing on the child', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    await runCreateAgent({ name: 'Scout', instructions: 'help' });
+
+    expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+    expect(mockUpdateScalars).not.toHaveBeenCalled();
+    expect(mockUpdateJson).not.toHaveBeenCalled();
+  });
+
+  it('an unreadable creator env does not stop the child being created', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global', provider: 'opencode', env: '{not json' });
+
+    await runCreateAgent({ name: 'Scout', instructions: 'help' });
+
+    expect(mockCreateAgentGroup).toHaveBeenCalledTimes(1);
+    expect(mockUpdateJson).not.toHaveBeenCalled();
   });
 });
 
