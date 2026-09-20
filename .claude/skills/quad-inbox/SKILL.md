@@ -62,6 +62,22 @@ Delete the task file only after verification passes. Report what was done for ea
 
 If a task's outcome needs to be communicated back to the container agent, write a response file to `quad-inbox/responses/` with a descriptive name like `report-<topic>.md`. Tell the user a report was left for the agent.
 
+Put a status line right under the title: `**Status:** Done`, or `**Status:** Blocked | Deferred | Open — <what it is waiting on>`. Step 8 uses it.
+
+### 8. Sweep old reports
+
+Reports are the agent's read-only mailbox and nothing else removes them, so this step does. Run it at the end of every `/quad-inbox` run:
+
+1. List reports (`.md` files directly in `quad-inbox/responses/`, not `archive/`) last modified 14+ days ago. Editing a report restarts its clock, so one flipped to `Done` gets a fresh 14 days:
+   ```bash
+   find groups/main/quad-inbox/responses -maxdepth 1 -name '*.md' -mmin +20160
+   ```
+2. Skip any report whose `**Status:**` line starts with Blocked, Deferred, or Open — that work is still pending. A report with no Status line counts as done. If unsure, leave it and ask.
+3. `mkdir -p quad-inbox/responses/archive` and `mv` the rest into it. Never delete a report.
+4. Tell the user which reports were archived. When a Blocked/Deferred/Open report's work resolves, change its Status to `Done` so it ages out on a later sweep.
+
+`responses/archive/` is history. Nobody acts on what is in it.
+
 ## Deferred tasks
 
 Tasks can be moved to `quad-inbox/deferred/` when they are:
