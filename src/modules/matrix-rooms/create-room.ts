@@ -19,7 +19,7 @@
  * speaking as someone else.
  */
 import { getChannelAdapterExact } from '../../channels/channel-registry.js';
-import { matrixInstanceName } from '../../channels/matrix-agent-accounts.js';
+import { matrixInstanceName, matrixLocalpart } from '../../channels/matrix-agent-accounts.js';
 import type { MatrixRoomCapable } from '../../channels/matrix.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getDb } from '../../db/connection.js';
@@ -38,6 +38,7 @@ import {
 import { writeDestinations } from '../agent-to-agent/write-destinations.js';
 import { notifyAgent, requestApproval } from '../approvals/index.js';
 import { getOwners } from '../permissions/db/user-roles.js';
+import { addressNames, orchestratorEngagePattern, subAgentEngagePattern } from './addressing.js';
 
 const NAME_MAX = 80;
 const TOPIC_MAX = 250;
@@ -46,6 +47,21 @@ const INVITE_MAX = 5;
 const MATRIX_USER_ID = /^@[a-z0-9._=\-/+]+:[a-z0-9.-]+(:\d+)?$/i;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/**
+ * The requester (the orchestrator) joining a sub-agent's room as a quiet member:
+ * it is wired to the room too, but only answers a message that STARTS with its
+ * name (see ./addressing.ts); everything else it keeps as background.
+ */
+export interface QuietMember {
+  requester: AgentGroup;
+  /** Adapter registry key of the requester's own Matrix account. */
+  instance: string;
+  /** The requester's Matrix user id, invited to the room. */
+  userId: string;
+  /** Words that address the requester, e.g. ["jorgenclaw"]. */
+  names: string[];
+}
 
 export interface RoomRequest {
   name: string;
@@ -56,11 +72,13 @@ export interface RoomRequest {
   target: AgentGroup;
   /** Adapter registry key whose account creates and owns the room. */
   instance: string;
+  /** Set when the room is for a sub-agent and the requester's own account can join it. */
+  quiet: QuietMember | null;
 }
 
 export type Resolved = { ok: true; req: RoomRequest } | { ok: false; error: string };
 
-type RoomAdapter = { createMatrixRoom?: MatrixRoomCapable['createMatrixRoom'] };
+type RoomAdapter = Partial<MatrixRoomCapable>;
 
 /**
  * Which Matrix account (adapter instance) speaks for this agent. A named
@@ -151,7 +169,23 @@ export function resolveRequest(content: Record<string, unknown>, session: Sessio
   const adapter = getChannelAdapterExact(instance) as RoomAdapter | undefined;
   if (!adapter?.createMatrixRoom) return { ok: false, error: 'Matrix is not connected right now. Try again later.' };
 
-  return { ok: true, req: { name, topic, invite, target, instance } };
+  // A room for a sub-agent also gets its requester, as a quiet member — but only
+  // if the requester has a live Matrix account that can join, and a name to be
+  // addressed by. Otherwise the room is made exactly as before.
+  let quiet: QuietMember | null = null;
+  if (target.id !== requester.id) {
+    const requesterInstance = matrixInstanceFor(requester);
+    const requesterAdapter = requesterInstance
+      ? (getChannelAdapterExact(requesterInstance) as RoomAdapter | undefined)
+      : undefined;
+    const userId = requesterAdapter?.matrixUserId?.();
+    const names = userId ? addressNames(requester.name, matrixLocalpart(userId)) : [];
+    if (requesterInstance && requesterAdapter?.joinMatrixRoom && userId && names.length > 0) {
+      quiet = { requester, instance: requesterInstance, userId, names };
+    }
+  }
+
+  return { ok: true, req: { name, topic, invite, target, instance, quiet } };
 }
 
 /** Guard precheck: malformed requests are answered without ever creating a hold. */
@@ -186,7 +220,11 @@ export async function requestCreateMatrixRoomHold(content: Record<string, unknow
     question:
       `Agent "${requester.name}" wants to create a private Matrix room "${req.name}"` +
       `${req.topic ? ` (${req.topic})` : ''}, invite ${req.invite.join(', ')}, ` +
-      `and connect it to the agent "${req.target.name}". Approve?`,
+      `and connect it to the agent "${req.target.name}".` +
+      (req.quiet
+        ? ` ${requester.name} will also join as a quiet member: it answers only messages that start with its name, and everything else goes to "${req.target.name}".`
+        : '') +
+      ' Approve?',
   });
 }
 
@@ -209,7 +247,9 @@ export async function createMatrixRoom(content: Record<string, unknown>, session
     created = await adapter.createMatrixRoom({
       name: req.name,
       topic: req.topic ?? undefined,
-      invite: req.invite,
+      // The requester is invited on top of what Scott approved: joining quietly
+      // is stated on the approval card.
+      invite: req.quiet ? [...new Set([...req.invite, req.quiet.userId])] : req.invite,
       agentGroupId: req.target.id,
     });
   } catch (err) {
@@ -218,9 +258,22 @@ export async function createMatrixRoom(content: Record<string, unknown>, session
     return;
   }
 
+  // Join right away rather than trusting the requester's invite auto-join setting.
+  let quietJoined = false;
+  if (req.quiet) {
+    const requesterAdapter = getChannelAdapterExact(req.quiet.instance) as RoomAdapter | undefined;
+    try {
+      await requesterAdapter!.joinMatrixRoom!(created.roomId);
+      quietJoined = true;
+    } catch (err) {
+      log.warn('create_matrix_room: the requester could not join the room yet', { roomId: created.roomId, err });
+    }
+  }
+
   const now = new Date().toISOString();
   const suffix = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const mgId = `mg-${suffix()}`;
+  const quietMgId = req.quiet ? `mg-${suffix()}` : null;
   try {
     getDb().transaction(() => {
       createMessagingGroup({
@@ -239,13 +292,41 @@ export async function createMatrixRoom(content: Record<string, unknown>, session
         messaging_group_id: mgId,
         agent_group_id: req.target.id,
         engage_mode: 'pattern',
-        engage_pattern: '.',
+        // With the requester in the room, the sub-agent must skip the messages addressed to it.
+        engage_pattern: req.quiet ? subAgentEngagePattern(req.quiet.names) : '.',
         sender_scope: 'known',
         ignored_message_policy: 'drop',
         session_mode: 'shared',
         priority: 0,
         created_at: now,
       });
+      if (req.quiet && quietMgId) {
+        // The same room seen through the requester's own account: its own messaging
+        // group (the instance is part of the key), answering only when addressed by
+        // name and keeping everything else as silent background.
+        createMessagingGroup({
+          id: quietMgId,
+          channel_type: 'matrix',
+          instance: req.quiet.instance,
+          platform_id: created.platformId,
+          name: `${req.name} room`,
+          is_group: 1,
+          unknown_sender_policy: 'strict',
+          created_at: now,
+        });
+        createMessagingGroupAgent({
+          id: `mga-${suffix()}`,
+          messaging_group_id: quietMgId,
+          agent_group_id: req.quiet.requester.id,
+          engage_mode: 'pattern',
+          engage_pattern: orchestratorEngagePattern(req.quiet.names),
+          sender_scope: 'known',
+          ignored_message_policy: 'accumulate',
+          session_mode: 'shared',
+          priority: 0,
+          created_at: now,
+        });
+      }
     })();
   } catch (err) {
     log.error('create_matrix_room: room created but wiring failed', { roomId: created.roomId, err });
@@ -258,9 +339,13 @@ export async function createMatrixRoom(content: Record<string, unknown>, session
 
   // The wiring's destination row exists centrally; project it into the
   // running session so send_message(to=...) works right away.
-  if (req.target.id === session.agent_group_id) writeDestinations(session.agent_group_id, session.id);
+  if (req.target.id === session.agent_group_id || req.quiet) writeDestinations(session.agent_group_id, session.id);
 
   const destination = getDestinationByTarget(req.target.id, 'channel', mgId)?.local_name;
+  const quietDestination =
+    req.quiet && quietMgId
+      ? getDestinationByTarget(req.quiet.requester.id, 'channel', quietMgId)?.local_name
+      : undefined;
   log.info('Matrix room created for agent', {
     roomId: created.roomId,
     messagingGroupId: mgId,
@@ -268,6 +353,7 @@ export async function createMatrixRoom(content: Record<string, unknown>, session
     agentGroupId: req.target.id,
     requestedBy: session.agent_group_id,
     invited: req.invite,
+    quietMember: req.quiet ? { instance: req.quiet.instance, joined: quietJoined } : null,
   });
   // Worded as a REPORT, not an invitation: an earlier wording ("you can post there
   // with send_message…") made the agent post into the room unprompted and then
@@ -281,8 +367,15 @@ export async function createMatrixRoom(content: Record<string, unknown>, session
       (isSelf
         ? 'When someone writes in that room you will get their message from there, and your reply goes back to that room. '
         : `When someone writes in that room, it is handled by "${req.target.name}", not by you. `) +
+      (req.quiet
+        ? quietJoined
+          ? `You are in that room as a quiet member: you only receive a message there when it STARTS with your name (for example "${req.quiet.names[0]}, ..."); everything else is kept as background and you do not answer it. `
+          : 'You could not join that room yet, so you will not see anything there until you do. Tell Scott. '
+        : '') +
       (isSelf && destination
         ? `Only if Scott asks you to post something into it, use send_message({ to: "${destination}" }).`
-        : ''),
+        : quietDestination
+          ? `Only if Scott asks you to post something into it, use send_message({ to: "${quietDestination}" }).`
+          : ''),
   );
 }

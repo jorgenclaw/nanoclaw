@@ -107,6 +107,7 @@ vi.mock('../../db/sessions.js', () => ({
 import './index.js';
 import { getDeliveryAction } from '../../delivery.js';
 import { guard } from '../../guard/index.js';
+import { orchestratorEngagePattern, subAgentEngagePattern } from './addressing.js';
 import { matrixRoomsCreate } from './guard.js';
 
 const SESSION = { id: 'sess-1', agent_group_id: 'ag-1' } as Session;
@@ -341,6 +342,123 @@ describe('create_matrix_room — one Matrix account per agent', () => {
 
     expect(mockRequestApproval).not.toHaveBeenCalled();
     expect(mockNotifyAgent.mock.calls[0][1]).toMatch(/not one of your sub-agents/);
+  });
+});
+
+describe('create_matrix_room — the requester joins a sub-agent room as a quiet member', () => {
+  const JORGENCLAW = '@jorgenclaw:matrix.jorgenclaw.ai';
+  const NAMES = ['jorgenclaw']; // first word of the group name "Jorgenclaw" == the Matrix localpart
+  const CODER_REQUEST = { name: 'Coding', agent: 'Coder' };
+  const CODER_APPROVED = { name: 'Coding', topic: null, invite: [SCOTT], agent: 'Coder' };
+  const mockJoin = vi.fn();
+  let coderCreate: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockJoin.mockReset().mockResolvedValue(undefined);
+    coderCreate = vi.fn().mockResolvedValue(NEW_ROOM);
+    mockGetAdapter.mockImplementation((key: string) =>
+      key === 'matrix-coder'
+        ? { createMatrixRoom: coderCreate }
+        : key === 'matrix'
+          ? {
+              createMatrixRoom: (...a: unknown[]) => mockCreateRoom(...a),
+              matrixUserId: () => JORGENCLAW,
+              joinMatrixRoom: (...a: unknown[]) => mockJoin(...a),
+            }
+          : undefined,
+    );
+  });
+
+  it('the approval card says so, and the approved payload still lists only who Scott approved', async () => {
+    await runCreateRoom(CODER_REQUEST);
+
+    expect(mockRequestApproval).toHaveBeenCalledTimes(1);
+    const card = mockRequestApproval.mock.calls[0][0] as { question: string; payload: Record<string, unknown> };
+    expect(card.question).toMatch(/Jorgenclaw will also join as a quiet member/);
+    expect(card.payload).toEqual(CODER_APPROVED); // the requester is not smuggled into the approved invitees
+  });
+
+  it('invites and joins the requester, and wires it to the room next to the sub-agent', async () => {
+    await approve(CODER_APPROVED);
+
+    expect(coderCreate).toHaveBeenCalledWith(expect.objectContaining({ invite: [SCOTT, JORGENCLAW] }));
+    expect(mockJoin).toHaveBeenCalledWith(NEW_ROOM.roomId);
+
+    // two messaging groups for ONE room, one per account (the instance is part of the key)
+    expect(mockCreateMessagingGroup).toHaveBeenCalledTimes(2);
+    expect(mockCreateMessagingGroup.mock.calls[0][0]).toMatchObject({
+      instance: 'matrix-coder',
+      platform_id: NEW_ROOM.platformId,
+      name: 'Coding',
+    });
+    expect(mockCreateMessagingGroup.mock.calls[1][0]).toMatchObject({
+      instance: 'matrix',
+      platform_id: NEW_ROOM.platformId,
+      name: 'Coding room',
+      unknown_sender_policy: 'strict',
+    });
+
+    // the sub-agent skips messages addressed to the requester; the requester answers only those
+    expect(mockCreateMessagingGroupAgent.mock.calls[0][0]).toMatchObject({
+      agent_group_id: 'ag-2',
+      engage_pattern: subAgentEngagePattern(NAMES),
+      ignored_message_policy: 'drop',
+    });
+    expect(mockCreateMessagingGroupAgent.mock.calls[1][0]).toMatchObject({
+      agent_group_id: 'ag-1',
+      engage_mode: 'pattern',
+      engage_pattern: orchestratorEngagePattern(NAMES),
+      sender_scope: 'known',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'shared',
+    });
+    // the requester's running session must see its new destination immediately
+    expect(mockWriteDestinations).toHaveBeenCalledWith('ag-1', 'sess-1');
+  });
+
+  it('tells the requester it is a quiet member, not to post, and how to be addressed', async () => {
+    await approve(CODER_APPROVED);
+
+    const report = mockNotifyAgent.mock.calls[0][1] as string;
+    expect(report).toMatch(/handled by "Coder", not by you/);
+    expect(report).toMatch(/quiet member/);
+    expect(report).toMatch(/STARTS with your name \(for example "jorgenclaw, \.\.\."\)/);
+    expect(report).toMatch(/Do NOT post in that room yourself/);
+  });
+
+  it('failing to join is not fatal: the room is still wired and the requester is told', async () => {
+    mockJoin.mockRejectedValue(new Error('M_FORBIDDEN'));
+
+    await approve(CODER_APPROVED);
+
+    expect(mockCreateMessagingGroup).toHaveBeenCalledTimes(2);
+    expect(mockNotifyAgent.mock.calls[0][1]).toMatch(/could not join that room yet/);
+    expect(mockNotifyAgent.mock.calls[0][1]).not.toMatch(/You are in that room as a quiet member/);
+  });
+
+  it("a requester's own room has no quiet member: one messaging group, answers everything, no join", async () => {
+    await approve(APPROVED);
+
+    expect(mockJoin).not.toHaveBeenCalled();
+    expect(mockCreateMessagingGroup).toHaveBeenCalledTimes(1);
+    expect(mockCreateMessagingGroupAgent).toHaveBeenCalledTimes(1);
+    expect(mockCreateMessagingGroupAgent.mock.calls[0][0]).toMatchObject({ engage_pattern: '.' });
+  });
+
+  it('a requester whose account cannot join makes the room exactly as before', async () => {
+    mockGetAdapter.mockImplementation((key: string) =>
+      key === 'matrix-coder'
+        ? { createMatrixRoom: coderCreate }
+        : key === 'matrix'
+          ? { createMatrixRoom: (...a: unknown[]) => mockCreateRoom(...a) } // no join, no user id
+          : undefined,
+    );
+
+    await approve(CODER_APPROVED);
+
+    expect(coderCreate).toHaveBeenCalledWith(expect.objectContaining({ invite: [SCOTT] }));
+    expect(mockCreateMessagingGroup).toHaveBeenCalledTimes(1);
+    expect(mockCreateMessagingGroupAgent.mock.calls[0][0]).toMatchObject({ engage_pattern: '.' });
   });
 });
 

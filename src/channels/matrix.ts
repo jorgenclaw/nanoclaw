@@ -68,7 +68,7 @@ const ENV_KEYS = [
  */
 export const AGENT_ROOM_STATE_TYPE = 'ai.jorgenclaw.agent_room';
 
-/** Room-creation capability the bridge exposes to the host (src/modules/matrix-rooms). */
+/** Room capabilities the bridge exposes to the host (src/modules/matrix-rooms). */
 export interface MatrixRoomCapable {
   createMatrixRoom(opts: {
     name: string;
@@ -76,6 +76,10 @@ export interface MatrixRoomCapable {
     invite: string[];
     agentGroupId: string;
   }): Promise<{ roomId: string; platformId: string }>;
+  /** The Matrix user id this account speaks as, e.g. "@jorgenclaw:matrix.jorgenclaw.ai". */
+  matrixUserId(): string | undefined;
+  /** Join a room this account has been invited to (an orchestrator joining a sub-agent's room). */
+  joinMatrixRoom(roomId: string): Promise<void>;
 }
 
 /**
@@ -431,7 +435,19 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
     return { roomId, platformId };
   }
 
-  return Object.assign(adapter, { warmDmCaches, isAgentRoom, createMatrixRoom });
+  /** Join a room this account was invited to. Explicit, so it never depends on invite auto-join settings. */
+  async function joinMatrixRoom(roomId: string): Promise<void> {
+    const client = (adapter as any).client;
+    if (!client) throw new Error('Matrix client is not ready');
+    await client.joinRoom(roomId);
+    log.info('Matrix: joined room', { roomId });
+  }
+
+  function matrixUserId(): string | undefined {
+    return (adapter as any).userID || undefined;
+  }
+
+  return Object.assign(adapter, { warmDmCaches, isAgentRoom, createMatrixRoom, joinMatrixRoom, matrixUserId });
 }
 
 /**
@@ -553,7 +569,11 @@ function createMatrixFactory(buildAdapter: () => ReturnType<typeof wrapWithDmRes
 
     // The registry hands the host this bridge, not the raw adapter, so the
     // room-creation capability has to ride on it.
-    return Object.assign(bridge, { createMatrixRoom: matrixAdapter.createMatrixRoom });
+    return Object.assign(bridge, {
+      createMatrixRoom: matrixAdapter.createMatrixRoom,
+      joinMatrixRoom: matrixAdapter.joinMatrixRoom,
+      matrixUserId: matrixAdapter.matrixUserId,
+    });
   };
 }
 
