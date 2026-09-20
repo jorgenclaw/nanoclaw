@@ -12,11 +12,14 @@
  *
  * Identity: each agent speaks as its own Matrix account (Scott's choice,
  * 2026-09-19). A room is created by — and wired to — the agent that will live
- * in it, using that agent's adapter instance. Today only the default `matrix`
- * instance (@jorgenclaw) exists; a sub-agent without an account of its own is
- * refused with a clear message rather than silently speaking as someone else.
+ * in it, using that agent's adapter instance. The default `matrix` instance is
+ * @jorgenclaw; a sub-agent gets its own `matrix-<folder>` instance from an
+ * account an operator provisions (scripts/matrix-provision-agent.ts). One
+ * without an account is refused with a clear message rather than silently
+ * speaking as someone else.
  */
 import { getChannelAdapterExact } from '../../channels/channel-registry.js';
+import { matrixInstanceName } from '../../channels/matrix-agent-accounts.js';
 import type { MatrixRoomCapable } from '../../channels/matrix.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getDb } from '../../db/connection.js';
@@ -65,7 +68,7 @@ type RoomAdapter = { createMatrixRoom?: MatrixRoomCapable['createMatrixRoom'] };
  * the agent that is already wired to Matrix (Jorgenclaw). Otherwise none.
  */
 export function matrixInstanceFor(group: AgentGroup): string | null {
-  const own = `matrix-${group.folder}`;
+  const own = matrixInstanceName(group.folder);
   if (getChannelAdapterExact(own)) return own;
   const wiredToDefault = getMessagingGroupsByAgentGroup(group.id).some(
     (mg) => mg.channel_type === 'matrix' && (mg.instance ?? 'matrix') === 'matrix',

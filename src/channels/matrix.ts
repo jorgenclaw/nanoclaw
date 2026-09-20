@@ -12,15 +12,28 @@
  *   MATRIX_INVITE_AUTOJOIN_ALLOWLIST — comma-separated user IDs allowed to invite
  *   MATRIX_RECOVERY_KEY         — enable E2EE cross-signing
  *   MATRIX_DEVICE_ID            — stable device ID across restarts
+ *
+ * Sub-agents speak as their own accounts: each entry in data/matrix-agent-accounts.json
+ * (written by scripts/matrix-provision-agent.ts) becomes a named instance `matrix-<folder>`.
  */
+import path from 'path';
+
 import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
 
+import { DATA_DIR } from '../config.js';
 import { getAskQuestionRender } from '../db/sessions.js';
 import { log } from '../log.js';
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import {
+  ACCOUNTS_FILE_NAME,
+  loadAgentAccounts,
+  matrixInstanceName,
+  matrixLocalpart,
+  type AgentAccount,
+} from './matrix-agent-accounts.js';
 import { cardToAnswerableText, findPendingCard, matchAnswer, QUESTION_KEY } from './matrix-cards.js';
 
 /**
@@ -421,24 +434,18 @@ function wrapWithDmResolution(adapter: ReturnType<typeof createMatrixAdapter>): 
   return Object.assign(adapter, { warmDmCaches, isAgentRoom, createMatrixRoom });
 }
 
-registerChannelAdapter('matrix', {
-  factory: () => {
-    const env = readEnvFile([...ENV_KEYS]);
-    if (!env.MATRIX_BASE_URL) return null;
-    if (!env.MATRIX_ACCESS_TOKEN && !(env.MATRIX_USERNAME && env.MATRIX_PASSWORD)) return null;
-
-    for (const key of ENV_KEYS) {
-      if (env[key]) process.env[key] = env[key];
-    }
-
-    // Default: auto-join room invites so DMs work without manual acceptance
-    if (!process.env.MATRIX_INVITE_AUTOJOIN) {
-      process.env.MATRIX_INVITE_AUTOJOIN = 'true';
-    }
-
-    const matrixAdapter = wrapWithDmResolution(createMatrixAdapter());
+/**
+ * The channel factory for ONE Matrix account: the default account (@jorgenclaw)
+ * and each per-agent account share everything below; only how the underlying
+ * adapter is built, and the instance name, differ.
+ */
+function createMatrixFactory(buildAdapter: () => ReturnType<typeof wrapWithDmResolution> | null, instance?: string) {
+  return () => {
+    const matrixAdapter = buildAdapter();
+    if (!matrixAdapter) return null;
     const bridge = createChatSdkBridge({
       adapter: matrixAdapter,
+      ...(instance ? { instance } : {}),
       concurrency: 'concurrent',
       supportsThreads: false,
       defaults: MATRIX_DEFAULTS,
@@ -547,6 +554,65 @@ registerChannelAdapter('matrix', {
     // The registry hands the host this bridge, not the raw adapter, so the
     // room-creation capability has to ride on it.
     return Object.assign(bridge, { createMatrixRoom: matrixAdapter.createMatrixRoom });
-  },
+  };
+}
+
+registerChannelAdapter('matrix', {
+  factory: createMatrixFactory(() => {
+    const env = readEnvFile([...ENV_KEYS]);
+    if (!env.MATRIX_BASE_URL) return null;
+    if (!env.MATRIX_ACCESS_TOKEN && !(env.MATRIX_USERNAME && env.MATRIX_PASSWORD)) return null;
+
+    for (const key of ENV_KEYS) {
+      if (env[key]) process.env[key] = env[key];
+    }
+
+    // Default: auto-join room invites so DMs work without manual acceptance
+    if (!process.env.MATRIX_INVITE_AUTOJOIN) {
+      process.env.MATRIX_INVITE_AUTOJOIN = 'true';
+    }
+
+    return wrapWithDmResolution(createMatrixAdapter());
+  }),
   defaults: MATRIX_DEFAULTS,
 });
+
+/**
+ * A sub-agent's own account. Configured explicitly instead of through
+ * process.env (which the default account owns), and with NO invite auto-join:
+ * the agent only ever lives in rooms NanoClaw created for it, so nobody can pull
+ * it into a room by inviting it.
+ */
+function createAgentAccountAdapter(account: AgentAccount) {
+  const baseURL = readEnvFile(['MATRIX_BASE_URL']).MATRIX_BASE_URL;
+  if (!baseURL) return null;
+  return wrapWithDmResolution(
+    createMatrixAdapter({
+      baseURL,
+      auth: { type: 'accessToken', accessToken: account.accessToken, userID: account.userId },
+      userName: matrixLocalpart(account.userId),
+      deviceID: account.deviceId,
+      matrixSDKLogLevel: 'error',
+    }),
+  );
+}
+
+/**
+ * Register one named instance per agent that has its own account, and return
+ * the instance names. Read once at load (like the registry itself), so a new
+ * account takes effect at the next restart.
+ */
+export function registerAgentAccountInstances(accountsFile: string): string[] {
+  const { accounts, problems } = loadAgentAccounts(accountsFile);
+  for (const problem of problems) log.warn(`Matrix agent accounts: ${problem}`);
+  return accounts.map((account) => {
+    const instance = matrixInstanceName(account.folder);
+    registerChannelAdapter(instance, {
+      factory: createMatrixFactory(() => createAgentAccountAdapter(account), instance),
+      defaults: MATRIX_DEFAULTS,
+    });
+    return instance;
+  });
+}
+
+registerAgentAccountInstances(path.join(DATA_DIR, ACCOUNTS_FILE_NAME));
