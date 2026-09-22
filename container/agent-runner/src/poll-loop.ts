@@ -523,7 +523,7 @@ export async function processQuery(
         let retryQueued = false;
         let producedUnwrappedScratchpad = false;
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
+          const { sent, hasUnwrapped, taskBlocks, scratchpad } = dispatchResultText(event.text, routing);
           producedUnwrappedScratchpad = hasUnwrapped;
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
@@ -558,12 +558,7 @@ export async function processQuery(
               retryQueued = true;
               const destinations = getAllDestinations();
               const names = destinations.map((d) => d.name).join(', ');
-              query.push(
-                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                  `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
-              );
+              query.push(buildUnwrappedNudge(scratchpad, names));
             }
             if (willRetryTaskBlocks) {
               taskBlockNudged = true;
@@ -706,10 +701,10 @@ function looksLikeHallucinatedToolCall(text: string): boolean {
 export function dispatchResultText(
   text: string,
   routing: RoutingContext,
-): { sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] } {
+): { sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; scratchpad: string } {
   if (looksLikeHallucinatedToolCall(text)) {
     log(`Suppressed hallucinated tool-call syntax in result text (${text.length} chars)`);
-    return { sent: 0, hasUnwrapped: false, taskBlocks: [] };
+    return { sent: 0, hasUnwrapped: false, taskBlocks: [], scratchpad: '' };
   }
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
@@ -766,7 +761,31 @@ export function dispatchResultText(
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
-  return { sent, hasUnwrapped, taskBlocks };
+  return { sent, hasUnwrapped, taskBlocks, scratchpad };
+}
+
+/**
+ * Build the same-turn correction nudge for a chat reply that had no
+ * `<message to="...">` wrapper. Embeds the undelivered text so the retry can
+ * copy it verbatim instead of reconstructing it from memory.
+ *
+ * Without this, the model was asked to "re-send with the correct wrapping"
+ * with nothing to copy from, and small local models reliably answered with a
+ * short paraphrase instead of the original — e.g. a 2,175-char researched
+ * answer became a 125-char lead-in sentence, repeated on every later retry
+ * since the model believed it had already sent the real thing (2026-09-21/22,
+ * Lauren Moore / Disneyland Feb 2027 crowd forecast). Mirrors
+ * buildTaskBlockNudge, which already does this for task-run undelivered
+ * blocks.
+ */
+export function buildUnwrappedNudge(scratchpad: string, destinationNames: string): string {
+  return (
+    '<system>Your response below was not delivered — it was not wrapped in <message to="name">...</message> blocks:\n' +
+    `<undelivered_response>${escapePromptXml(scratchpad)}</undelivered_response>\n` +
+    'Re-send the SAME content above, wrapped in <message to="name">...</message> — do not rewrite, shorten, or summarize it. ' +
+    'Use <internal>...</internal> for scratchpad you do not want sent. ' +
+    `Your destinations: ${escapePromptXml(destinationNames)}.</system>`
+  );
 }
 
 /**
