@@ -10,6 +10,7 @@ import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
 import { CONTEXT_OVERFLOW_USER_MESSAGE, isContextOverflowError } from './opencode-overflow.js';
+import { TurnResultTracker } from './opencode-turn-result.js';
 
 /**
  * Detect `[Image: <absolute-path>]` markers in user-message text and convert
@@ -459,11 +460,9 @@ export class OpenCodeProvider implements AgentProvider {
           throw new Error(`OpenCode promptAsync: ${JSON.stringify(promptRes.error)}`);
         }
 
-        const partTextByMessageId = new Map<string, string>();
-        const roleByMessageId = new Map<string, string>();
-        // Compaction summaries are assistant messages full of text that must
-        // never be mistaken for the turn's reply.
-        const summaryMessageIds = new Set<string>();
+        // Collects the turn's messages and picks the reply text, including
+        // what to keep when OpenCode compacts mid-turn (see opencode-turn-result.ts).
+        const turnResult = new TurnResultTracker();
         // Context overflow: OpenCode reports the error, then compacts the
         // session and finishes the turn itself. Track it so we wait for that
         // instead of failing the turn (see opencode-overflow.ts).
@@ -514,18 +513,15 @@ export class OpenCodeProvider implements AgentProvider {
 
           switch (ev.type) {
             case 'message.updated': {
-              const info = ev.properties.info as { id?: string; role?: string; summary?: unknown } | undefined;
-              if (info?.id && info?.role) {
-                roleByMessageId.set(info.id, info.role);
-                if (info.role === 'assistant' && info.summary === true) summaryMessageIds.add(info.id);
-              }
+              turnResult.onMessageUpdated(
+                ev.properties.info as { id?: string; role?: string; summary?: unknown; finish?: string } | undefined,
+              );
               break;
             }
             case 'message.part.updated': {
-              const part = ev.properties.part as { type?: string; messageID?: string; text?: string } | undefined;
-              if (part?.type === 'text' && part.messageID && part.text) {
-                partTextByMessageId.set(part.messageID, part.text);
-              }
+              turnResult.onPartUpdated(
+                ev.properties.part as { type?: string; messageID?: string; text?: string } | undefined,
+              );
               break;
             }
             case 'permission.updated': {
@@ -622,13 +618,7 @@ export class OpenCodeProvider implements AgentProvider {
           }
         }
 
-        let resultText = '';
-        for (const [msgId, role] of roleByMessageId) {
-          if (role === 'assistant' && !summaryMessageIds.has(msgId)) {
-            resultText = partTextByMessageId.get(msgId) ?? resultText;
-          }
-        }
-        yield { type: 'result', text: resultText || null };
+        yield { type: 'result', text: turnResult.resultText() || null };
       }
     }
 
