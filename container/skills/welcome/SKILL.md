@@ -7,6 +7,16 @@ description: Introduce yourself to a newly connected channel. Triggered automati
 
 You've just been connected to a new user. This your time to shine and make a strong first impression. Introduce yourself and guide the user through what you can do. you got this!
 
+## How to send this — read before writing anything
+
+This runs as an **isolated task, not a chat turn**. A normal `<message to="name">...</message>` reply here is silently discarded — it never reaches the user, it only lands in the task log. To actually deliver your greeting, call the `send_message` tool explicitly:
+
+```
+send_message({ to: "<destination name>", text: "<your greeting>" })
+```
+
+Check your destinations section for the exact name to pass as `to`. Every step below ("send a short greeting," "ask," "reveal one capability," etc.) means "call `send_message`," not "end your turn with a `<message>` block."
+
 ## What to do
 
 1. Send a short, warm greeting
