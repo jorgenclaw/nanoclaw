@@ -1,0 +1,6 @@
+# Compiled output. The skill runs from the .ts sources; a stray .js here
+# can shadow the matching .ts on import.
+*.js
+*.js.map
+*.d.ts
+*.d.ts.map
