@@ -134,6 +134,8 @@ export const X_SELECTORS = {
   listPickerSaveButton: '[role="dialog"] [role="button"]:has-text("Save")',
   /** Member row in the list-members dialog. innerText carries "@handle". */
   listMemberCell: '[role="dialog"] [data-testid="UserCell"]',
+  /** "Edit List" link on a list's page (owner only). Opens the edit dialog. */
+  listEditLink: (listId: string) => `a[href="/i/lists/${listId}/info"]`,
   /** Dialog close button. */
   dialogClose: '[data-testid="app-bar-close"]',
 };
@@ -165,8 +167,6 @@ export const X_URLS = {
 
   /** A list's timeline page. */
   list: (listId: string) => `https://x.com/i/lists/${listId}`,
-  /** Edit-list dialog (name / description / private). */
-  listEdit: (listId: string) => `https://x.com/i/lists/${listId}/info`,
   /** List members dialog. */
   listMembers: (listId: string) => `https://x.com/i/lists/${listId}/members`,
   /** Create-list dialog. */

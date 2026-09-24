@@ -7,7 +7,7 @@
 
 import { getBrowserContext, runScript, ScriptResult, ensureLoggedIn, captureFailure, config } from '../lib/browser.js';
 import { X_URLS } from '../lib/locators.js';
-import { fetchMyLists, renderLists } from '../lib/lists.js';
+import { fetchMyLists, LISTS_READ_FAILED, renderLists } from '../lib/lists.js';
 
 type Input = Record<string, never>;
 
@@ -23,7 +23,7 @@ async function readMyLists(_input: Input): Promise<ScriptResult> {
     const result = await fetchMyLists(page);
     if (!result) {
       await captureFailure(page, 'read-my-lists-no-handle');
-      return { success: false, message: 'Could not determine the logged-in handle.' };
+      return { success: false, message: LISTS_READ_FAILED };
     }
     return {
       success: true,

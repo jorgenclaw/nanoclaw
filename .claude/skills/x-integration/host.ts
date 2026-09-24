@@ -163,26 +163,45 @@ interface XHandlerSpec {
   redactLogs?: boolean;
 }
 
-function makeXHandler(spec: XHandlerSpec): DeliveryActionHandler {
-  return async (content, session) => {
-    const requestId = (content.requestId as string) || 'unknown';
-    if (spec.required) {
-      for (const key of spec.required) {
-        if (content[key] === undefined || content[key] === null || content[key] === '') {
-          notifyAgent(session, `${spec.action} failed: missing ${key}.`);
-          return;
-        }
+async function runXAction(spec: XHandlerSpec, content: Record<string, unknown>, session: Session): Promise<void> {
+  const requestId = (content.requestId as string) || 'unknown';
+  if (spec.required) {
+    for (const key of spec.required) {
+      if (content[key] === undefined || content[key] === null || content[key] === '') {
+        notifyAgent(session, `${spec.action} failed: missing ${key}.`);
+        return;
       }
     }
-    if (spec.redactLogs) {
-      log.info('x-integration: starting (redacted)', { action: spec.action, requestId });
-    } else {
-      log.info('x-integration: starting', { action: spec.action, requestId });
-    }
-    const args = spec.buildArgs ? spec.buildArgs(content) : content;
-    const result = await pacedRun(() => runScript(spec.scriptName, args));
-    notify(session, spec.action, requestId, result);
-  };
+  }
+  if (spec.redactLogs) {
+    log.info('x-integration: starting (redacted)', { action: spec.action, requestId });
+  } else {
+    log.info('x-integration: starting', { action: spec.action, requestId });
+  }
+  const args = spec.buildArgs ? spec.buildArgs(content) : content;
+  const result = await pacedRun(() => runScript(spec.scriptName, args));
+  notify(session, spec.action, requestId, result);
+}
+
+/**
+ * Start an X action without making delivery wait for it. The result
+ * reaches the agent via notifyAgent either way; awaiting here held the
+ * delivery drain for the whole paced queue (10s spacing + ~20s per
+ * script), which tripped the 120s drain watchdog and re-dispatched the
+ * still-undelivered row — the same request ran two or three times
+ * (2026-09-23). Trade-off: actions still queued in pacedRun are lost on a
+ * host restart, with no result sent.
+ */
+function startXAction(spec: XHandlerSpec, content: Record<string, unknown>, session: Session): void {
+  runXAction(spec, content, session).catch((err) => {
+    log.error('x-integration: action threw', { action: spec.action, err });
+    notifyAgent(session, `${spec.action} failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+
+/** Unguarded registration path — direct handler, no approval gate. */
+function makeXHandler(spec: XHandlerSpec): DeliveryActionHandler {
+  return async (content, session) => startXAction(spec, content, session);
 }
 
 // ── Registrations (no x_delete_tweet — defense in depth) ────

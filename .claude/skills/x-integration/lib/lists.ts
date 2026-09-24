@@ -12,6 +12,9 @@ import type { Page } from 'playwright-core';
 import { config } from './config.js';
 import { X_SELECTORS, X_URLS } from './locators.js';
 
+export const LISTS_READ_FAILED =
+  "Couldn't read your lists from X (the page loaded but the list data didn't arrive). Retry once; if it fails again, report it.";
+
 export interface XList {
   id: string;
   name: string;
@@ -69,6 +72,7 @@ function collectListObjects(node: unknown, out: Map<string, XList>): void {
  * GraphQL responses the page itself fetches — the list rows in the DOM
  * carry no links, so the IDs are only available from the data.
  */
+/** Returns null when the lists can't be read (no handle, or the data never arrived). */
 export async function fetchMyLists(page: Page): Promise<{ handle: string; lists: XList[] } | null> {
   const handle = await getMyHandle(page);
   if (!handle) return null;
@@ -80,30 +84,59 @@ export async function fetchMyLists(page: Page): Promise<{ handle: string; lists:
   };
   page.on('response', onResponse);
   try {
+    // Wait for the lists query itself rather than a fixed delay — on a slow
+    // night it landed after the old 5s window and the tool reported
+    // "0 lists" (2026-09-23). Armed before goto so a fast response isn't missed.
+    const listsQuery = page
+      .waitForResponse((r) => /\/graphql\/[^/]+\/ListsManagement/.test(r.url()), { timeout: 30000 })
+      .catch(() => null);
     await page.goto(X_URLS.userLists(handle), { timeout: config.timeouts.navigation, waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(config.timeouts.pageLoad + 2000);
+    await listsQuery;
+    await page.waitForTimeout(1000);
     await Promise.all(pending);
   } finally {
     page.off('response', onResponse);
   }
   const mine = [...found.values()].filter((l) => l.ownerHandle?.toLowerCase() === handle.toLowerCase());
+  if (mine.length === 0) {
+    // "You have no lists" makes an agent create duplicates, so only say it
+    // when the page agrees. Rows on screen but no data = a failed read.
+    const rows = await page.locator(X_SELECTORS.listCell).count().catch(() => 0);
+    if (rows > 0) return null;
+  }
   return { handle, lists: mine };
 }
 
 /**
- * Resolve a list reference (URL, ID, or exact name) to its ID and name.
- * For a URL/ID the name is read from the edit dialog, so it only works for
- * lists the user owns — which is the only kind that can be edited anyway.
+ * Open a list's Edit List dialog. Going straight to /i/lists/<id>/info
+ * redirects to the list page (verified 2026-09-23), so load the list and
+ * click its "Edit List" link — only present on lists the user owns.
  */
-export async function resolveList(page: Page, ref: string): Promise<{ id: string | null; name: string } | { error: string }> {
+export async function openEditListDialog(page: Page, id: string): Promise<boolean> {
+  await page.goto(X_URLS.list(id), { timeout: config.timeouts.navigation, waitUntil: 'domcontentloaded' });
+  const edit = page.locator(X_SELECTORS.listEditLink(id));
+  const found = await edit.waitFor({ timeout: config.timeouts.navigation }).then(() => true).catch(() => false);
+  if (!found) return false;
+  await edit.click();
+  return page.locator(X_SELECTORS.listNameInput).waitFor({ timeout: config.timeouts.navigation }).then(() => true).catch(() => false);
+}
+
+/**
+ * Resolve a list reference (URL, ID, or exact name) to its ID and name,
+ * among the user's own lists — the only ones whose membership they can
+ * edit. Uses the same GraphQL read as fetchMyLists, no dialog needed.
+ */
+export async function resolveList(page: Page, ref: string): Promise<{ id: string; name: string } | { error: string }> {
+  const mine = await fetchMyLists(page);
+  if (!mine) return { error: LISTS_READ_FAILED };
   const id = parseListId(ref);
-  if (!id) return { id: null, name: ref.trim() };
-  await page.goto(X_URLS.listEdit(id), { timeout: config.timeouts.navigation, waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(config.timeouts.pageLoad);
-  const input = page.locator(X_SELECTORS.listNameInput);
-  const visible = await input.waitFor({ timeout: config.timeouts.elementWait }).then(() => true).catch(() => false);
-  if (!visible) return { error: `Couldn't open list ${id} for editing — it may not exist or may not be one of your lists.` };
-  return { id, name: await input.inputValue() };
+  const matches = id
+    ? mine.lists.filter((l) => l.id === id)
+    : mine.lists.filter((l) => l.name.toLowerCase() === ref.trim().toLowerCase());
+  if (matches.length === 1) return { id: matches[0].id, name: matches[0].name };
+  if (matches.length > 1) return { error: `More than one of your lists is named "${ref}" — pass the list URL instead.` };
+  const yours = mine.lists.map((l) => `"${l.name}" ${l.url}`).join(', ') || '(none)';
+  return { error: `"${ref}" is not one of your lists. Your lists: ${yours}.` };
 }
 
 /**
@@ -114,7 +147,7 @@ export async function resolveListId(page: Page, ref: string): Promise<{ id: stri
   const id = parseListId(ref);
   if (id) return { id };
   const mine = await fetchMyLists(page);
-  if (!mine) return { error: 'Could not determine the logged-in handle.' };
+  if (!mine) return { error: LISTS_READ_FAILED };
   const matches = mine.lists.filter((l) => l.name.toLowerCase() === ref.trim().toLowerCase());
   if (matches.length === 1) return { id: matches[0].id };
   if (matches.length === 0) {

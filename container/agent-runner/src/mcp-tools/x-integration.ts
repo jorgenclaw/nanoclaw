@@ -654,7 +654,9 @@ export const xCreateList = makeXTool({
   name: 'x_create_list',
   description:
     'Create a new X list on the user\'s account. Public by default — pass private=true for a list only the user can see. ' +
-    'Refuses a name the user already uses for another list. Returns the new list\'s URL; add people afterwards with x_edit_list_members.',
+    'Refuses a name the user already uses for another list — if that happens, the existing list IS the one to use: take its URL from the error ' +
+    'and carry on with it. Never create a variant name (e.g. "school-day-2") to get around the refusal; every extra list is a real public list ' +
+    'on the user\'s account. Returns the new list\'s URL; add people afterwards with x_edit_list_members. Call this ONCE per list.',
   action: 'x_create_list',
   inputSchema: {
     type: 'object' as const,
@@ -705,7 +707,9 @@ export const xEditListMembers = makeXTool({
   description:
     `Add and/or remove people on one of the user's X lists, by handle. Up to ${LIST_MEMBERS_PER_CALL} handles per call (add + remove combined); ` +
     'split bigger changes into several calls. Each handle takes ~10s. Adding someone to a PUBLIC list notifies them on X. ' +
-    'The result reports each handle separately (added / removed / already there / failed).',
+    'The result reports each handle separately (added / removed / already there / failed). ' +
+    'Pass the URL of the exact list the user asked for. If a call fails, quote the exact error text to the user; ' +
+    'if the same error comes back twice, stop and report it rather than retrying or switching to a different list.',
   action: 'x_edit_list_members',
   inputSchema: {
     type: 'object' as const,

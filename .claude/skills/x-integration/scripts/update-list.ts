@@ -6,7 +6,7 @@
 
 import { getBrowserContext, runScript, config, ScriptResult, ensureLoggedIn, captureFailure } from '../lib/browser.js';
 import { X_SELECTORS, X_URLS } from '../lib/locators.js';
-import { fetchMyLists, resolveListId } from '../lib/lists.js';
+import { fetchMyLists, LISTS_READ_FAILED, openEditListDialog, resolveListId } from '../lib/lists.js';
 
 interface Input { list: string; name?: string | null; description?: string | null; private?: boolean | null }
 
@@ -39,14 +39,13 @@ async function updateList(input: Input): Promise<ScriptResult> {
 
     if (name !== null) {
       const mine = await fetchMyLists(page);
-      const dup = mine?.lists.find((l) => l.id !== id && l.name.toLowerCase() === name.toLowerCase());
+      if (!mine) return { success: false, message: LISTS_READ_FAILED };
+      const dup = mine.lists.find((l) => l.id !== id && l.name.toLowerCase() === name.toLowerCase());
       if (dup) return { success: false, message: `You already have another list named "${dup.name}" (${dup.url}). Pick a different name.` };
     }
 
-    await page.goto(X_URLS.listEdit(id), { timeout: config.timeouts.navigation, waitUntil: 'domcontentloaded' });
     const nameInput = page.locator(X_SELECTORS.listNameInput);
-    const opened = await nameInput.waitFor({ timeout: config.timeouts.navigation }).then(() => true).catch(() => false);
-    if (!opened) {
+    if (!(await openEditListDialog(page, id))) {
       await captureFailure(page, 'update-list-no-dialog');
       return { success: false, message: `Couldn't open the Edit List dialog for ${X_URLS.list(id)} — it may not exist or may not be one of your lists.` };
     }
@@ -65,8 +64,10 @@ async function updateList(input: Input): Promise<ScriptResult> {
     await page.waitForTimeout(config.timeouts.afterSubmit);
 
     // Verify by reopening the dialog and reading the fields back.
-    await page.goto(X_URLS.listEdit(id), { timeout: config.timeouts.navigation, waitUntil: 'domcontentloaded' });
-    await nameInput.waitFor({ timeout: config.timeouts.navigation });
+    if (!(await openEditListDialog(page, id))) {
+      await captureFailure(page, 'update-list-reopen');
+      return { success: false, message: `Saved, but couldn't reopen the list to confirm. Check ${X_URLS.list(id)} by hand.` };
+    }
     const now = {
       name: await nameInput.inputValue(),
       description: await page.locator(X_SELECTORS.listDescriptionInput).inputValue(),

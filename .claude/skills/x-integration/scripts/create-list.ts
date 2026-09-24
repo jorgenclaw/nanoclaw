@@ -8,7 +8,7 @@
 
 import { getBrowserContext, runScript, config, ScriptResult, ensureLoggedIn, captureFailure } from '../lib/browser.js';
 import { X_SELECTORS, X_URLS } from '../lib/locators.js';
-import { fetchMyLists } from '../lib/lists.js';
+import { fetchMyLists, LISTS_READ_FAILED } from '../lib/lists.js';
 
 interface Input { name: string; description?: string | null; private?: boolean }
 
@@ -31,8 +31,10 @@ async function createList(input: Input): Promise<ScriptResult> {
     const auth = await ensureLoggedIn(page);
     if (auth) return auth;
 
+    // No duplicate check without the data — refuse rather than risk a copy.
     const mine = await fetchMyLists(page);
-    const dup = mine?.lists.find((l) => l.name.toLowerCase() === name.toLowerCase());
+    if (!mine) return { success: false, message: LISTS_READ_FAILED };
+    const dup = mine.lists.find((l) => l.name.toLowerCase() === name.toLowerCase());
     if (dup) {
       return { success: false, message: `You already have a list named "${dup.name}": ${dup.url}. Pick a different name, or edit that one with x_update_list.` };
     }
