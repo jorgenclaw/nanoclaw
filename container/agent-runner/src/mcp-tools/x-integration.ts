@@ -18,8 +18,9 @@
  * Safety on x_delete_tweet: tool requires a `text_must_match` substring of
  * the tweet body. The host script reads the live tweet and refuses to
  * delete unless the substring is present. Guards against URL hallucinations
- * and copy-paste errors. No approval gate — consistent with the skill's
- * stance ("don't gate per action; wrap if you want approvals").
+ * and copy-paste errors. On the host, x_delete_tweet, x_unfollow, x_retweet
+ * and x_unretweet are also held for owner approval (src/modules/x-integration/
+ * guard.ts) — their descriptions tell the agent to expect that.
  *
  * Mechanism (mirrors mcp-tools/self-mod.ts): every tool writes a
  * kind:'system' row with content = JSON.stringify({action, requestId,
@@ -414,7 +415,7 @@ export const xUnlike = makeXTool({
 
 export const xRetweet = makeXTool({
   name: 'x_retweet',
-  description: 'Retweet a tweet on X (no comment).',
+  description: 'Retweet a tweet on X (no comment). Needs the owner\'s approval: you\'ll get "sent to the owner for approval" first, then the result once they answer. Don\'t resend while it\'s waiting.',
   action: 'x_retweet',
   inputSchema: { type: 'object' as const, properties: { tweet_url: tweetUrlSchema }, required: ['tweet_url'] },
   validate: requireTweetUrl,
@@ -423,7 +424,7 @@ export const xRetweet = makeXTool({
 
 export const xUnretweet = makeXTool({
   name: 'x_unretweet',
-  description: 'Undo your retweet of a tweet on X.',
+  description: 'Undo your retweet of a tweet on X. Needs the owner\'s approval: you\'ll get "sent to the owner for approval" first, then the result once they answer. Don\'t resend while it\'s waiting.',
   action: 'x_unretweet',
   inputSchema: { type: 'object' as const, properties: { tweet_url: tweetUrlSchema }, required: ['tweet_url'] },
   validate: requireTweetUrl,
@@ -459,7 +460,7 @@ export const xFollow = makeXTool({
 
 export const xUnfollow = makeXTool({
   name: 'x_unfollow',
-  description: 'Unfollow a user on X.',
+  description: 'Unfollow a user on X. Needs the owner\'s approval: you\'ll get "sent to the owner for approval" first, then the result once they answer. Don\'t resend while it\'s waiting.',
   action: 'x_unfollow',
   inputSchema: { type: 'object' as const, properties: { handle: handleSchema }, required: ['handle'] },
   validate: requireHandle,
@@ -473,7 +474,8 @@ export const xDeleteTweet = makeXTool({
     'REQUIRES text_must_match — a distinctive substring (≥5 chars) of the tweet body. ' +
     'The host script reads the live tweet first and refuses to delete unless the substring is present. ' +
     'This guards against URL hallucinations and copy-paste errors. ' +
-    'Always read the tweet (x_read_tweet) before calling delete, and pass back a phrase from it as text_must_match.',
+    'Always read the tweet (x_read_tweet) before calling delete, and pass back a phrase from it as text_must_match.' +
+    ' Needs the owner\'s approval: you\'ll get "sent to the owner for approval" first, then the result once they answer. Don\'t resend while it\'s waiting.',
   action: 'x_delete_tweet',
   inputSchema: {
     type: 'object' as const,

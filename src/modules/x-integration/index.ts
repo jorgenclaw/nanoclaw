@@ -13,9 +13,12 @@
  *      a kind:'chat' row in inbound.db AND wakes the container so the
  *      result lands on the next agent turn.
  *
- * Defense in depth: there is intentionally NO handler for
- * 'x_delete_tweet'. The MCP tool isn't defined, no script exists, and
- * delivery.ts will log "Unknown system action" and drop a forged row.
+ * Guard-gated actions: x_delete_tweet, x_unfollow, x_retweet, and
+ * x_unretweet always hold for owner approval when the requester is an
+ * agent (see ./guard.ts + ./request.ts) — these change the user's real X
+ * account in ways a script can't cleanly undo. Every other action
+ * (reads, posting, replying, liking, bookmarking, following, DMs) stays
+ * unguarded, matching the skill's existing per-action trust model.
  *
  * Imports below are written for the install destination
  * src/modules/x-integration/index.ts.
@@ -25,11 +28,22 @@ import * as path from 'node:path';
 
 import { PROJECT_ROOT } from '../../config.js';
 import type { DeliveryActionHandler } from '../../delivery.js';
-import { registerDeliveryAction } from '../../delivery.js';
+import { reenterGuardedDeliveryAction, registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
-import { notifyAgent } from '../approvals/index.js';
+import { notifyAgent, registerApprovalHandler } from '../approvals/index.js';
+import { xDeleteTweet, xRetweet, xUnfollow, xUnretweet } from './guard.js';
+import {
+  requestXDeleteTweetHold,
+  requestXRetweetHold,
+  requestXUnfollowHold,
+  requestXUnretweetHold,
+  validateXDeleteTweet,
+  validateXRetweet,
+  validateXUnfollow,
+  validateXUnretweet,
+} from './request.js';
 
 const SCRIPTS_DIR = path.join(PROJECT_ROOT, '.claude', 'skills', 'x-integration', 'scripts');
 /**
@@ -40,7 +54,6 @@ const SCRIPTS_DIR = path.join(PROJECT_ROOT, '.claude', 'skills', 'x-integration'
 const TSX_BIN = path.join(PROJECT_ROOT, 'node_modules', '.bin', 'tsx');
 const SCRIPT_TIMEOUT_MS = 120_000;
 const ACTION_DELAY_MS = 10_000;
-
 interface ScriptResult {
   success: boolean;
   message: string;
@@ -208,7 +221,19 @@ function makeXHandler(spec: XHandlerSpec): DeliveryActionHandler {
   return async (content, session) => startXAction(spec, content, session);
 }
 
-// ── Registrations (no x_delete_tweet — defense in depth) ────
+/**
+ * Guard-wrapped registration path — same script-execution body as
+ * makeXHandler, but typed to the 2-arg GuardedDeliveryHandler shape so it
+ * only ever runs on allow (a fresh allow or an approved replay), never on
+ * a bare unguarded dispatch. See ./guard.ts for which actions use this.
+ */
+function makeXGuardedHandler(spec: XHandlerSpec) {
+  return async (content: Record<string, unknown>, session: Session): Promise<void> =>
+    startXAction(spec, content, session);
+}
+
+// ── Registrations (x_delete_tweet, x_unfollow, x_retweet, x_unretweet
+// guard-gated behind owner approval — see ./guard.ts) ────────
 
 // Read
 registerDeliveryAction(
@@ -380,28 +405,38 @@ registerDeliveryAction(
 );
 registerDeliveryAction(
   'x_retweet',
-  makeXHandler({
+  makeXGuardedHandler({
     action: 'x_retweet',
     scriptName: 'retweet',
     required: ['tweetUrl'],
     buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
   }),
-  unguarded(
-    "X-integration tool — Playwright-driven browser action via the skill's own X session; no separate host-side approval gate ported yet, matches existing behavior pre-upgrade — see .nanoclaw-migrations/09-misc-customizations-jul2026.md",
-  ),
+  {
+    guardAction: xRetweet,
+    precheck: validateXRetweet,
+    requestHold: requestXRetweetHold,
+    onDeny: (_content, session, reason) => notifyAgent(session, `x_retweet denied: ${reason}`),
+  },
 );
+registerApprovalHandler('x_retweet', reenterGuardedDeliveryAction('x_retweet'));
+
 registerDeliveryAction(
   'x_unretweet',
-  makeXHandler({
+  makeXGuardedHandler({
     action: 'x_unretweet',
     scriptName: 'unretweet',
     required: ['tweetUrl'],
     buildArgs: (c) => ({ tweetUrl: c.tweetUrl }),
   }),
-  unguarded(
-    "X-integration tool — Playwright-driven browser action via the skill's own X session; no separate host-side approval gate ported yet, matches existing behavior pre-upgrade — see .nanoclaw-migrations/09-misc-customizations-jul2026.md",
-  ),
+  {
+    guardAction: xUnretweet,
+    precheck: validateXUnretweet,
+    requestHold: requestXUnretweetHold,
+    onDeny: (_content, session, reason) => notifyAgent(session, `x_unretweet denied: ${reason}`),
+  },
 );
+registerApprovalHandler('x_unretweet', reenterGuardedDeliveryAction('x_unretweet'));
+
 registerDeliveryAction(
   'x_bookmark',
   makeXHandler({
@@ -440,34 +475,41 @@ registerDeliveryAction(
 );
 registerDeliveryAction(
   'x_unfollow',
-  makeXHandler({
+  makeXGuardedHandler({
     action: 'x_unfollow',
     scriptName: 'unfollow',
     required: ['handle'],
     buildArgs: (c) => ({ handle: c.handle }),
   }),
-  unguarded(
-    "X-integration tool — Playwright-driven browser action via the skill's own X session; no separate host-side approval gate ported yet, matches existing behavior pre-upgrade — see .nanoclaw-migrations/09-misc-customizations-jul2026.md",
-  ),
+  {
+    guardAction: xUnfollow,
+    precheck: validateXUnfollow,
+    requestHold: requestXUnfollowHold,
+    onDeny: (_content, session, reason) => notifyAgent(session, `x_unfollow denied: ${reason}`),
+  },
 );
+registerApprovalHandler('x_unfollow', reenterGuardedDeliveryAction('x_unfollow'));
 
-// Delete tweet — irreversibly removes one of the user's own tweets.
-// The script enforces a text-echo safety guard (tweetUrl + textMustMatch);
-// host handler just passes both fields through. No approval gate — consistent
-// with the skill's per-action trust model. See scripts/delete-tweet.ts for
-// the safety logic.
+// Delete tweet — irreversibly removes one of the user's own tweets. The
+// script also enforces a text-echo safety guard (tweetUrl + textMustMatch)
+// as defense in depth, but the host-side gate is the guard: every request
+// holds for owner approval before the script ever runs. See ./guard.ts.
 registerDeliveryAction(
   'x_delete_tweet',
-  makeXHandler({
+  makeXGuardedHandler({
     action: 'x_delete_tweet',
     scriptName: 'delete-tweet',
     required: ['tweetUrl', 'textMustMatch'],
     buildArgs: (c) => ({ tweetUrl: c.tweetUrl, textMustMatch: c.textMustMatch }),
   }),
-  unguarded(
-    "X-integration tool — Playwright-driven browser action via the skill's own X session; no separate host-side approval gate ported yet, matches existing behavior pre-upgrade — see .nanoclaw-migrations/09-misc-customizations-jul2026.md",
-  ),
+  {
+    guardAction: xDeleteTweet,
+    precheck: validateXDeleteTweet,
+    requestHold: requestXDeleteTweetHold,
+    onDeny: (_content, session, reason) => notifyAgent(session, `x_delete_tweet denied: ${reason}`),
+  },
 );
+registerApprovalHandler('x_delete_tweet', reenterGuardedDeliveryAction('x_delete_tweet'));
 
 // Scheduling
 registerDeliveryAction(

@@ -9,7 +9,9 @@ MCP tools that automate every common X action through *your real browser* (Chrom
 
 > **Compatibility:** NanoClaw v2. Cross-platform: macOS and Linux.
 >
-> **Delete safety:** `x_delete_tweet` requires the caller to pass a substring of the tweet body as `text_must_match`. The host script reads the live tweet first and refuses to delete unless the substring is present — guards against URL hallucinations and copy-paste mistakes without adding an approval gate.
+> **Delete safety:** `x_delete_tweet` requires the caller to pass a substring of the tweet body as `text_must_match`. The host script reads the live tweet first and refuses to delete unless the substring is present — guards against URL hallucinations and copy-paste mistakes.
+>
+> **Owner approval:** `x_delete_tweet`, `x_unfollow`, `x_retweet` and `x_unretweet` are held for the owner's approval on the host (`src/modules/x-integration/guard.ts` + `request.ts`). The agent is told "sent to the owner for approval"; the action runs only if approved, and the approval is bound to the exact tweet/handle. A repeat of a request that's already waiting doesn't send a second card.
 
 ## Tool catalog
 
@@ -306,7 +308,7 @@ DMs are sensitive. Three protections shipped:
 ## Security
 
 - `data/x-browser-profile/` and `data/x-auth.json` are gitignored — session cookies never enter version control.
-- `x_delete_tweet` is the only irreversible action with a built-in safety guard: the caller must pass a substring of the tweet body as `text_must_match`, and the host script reads the live tweet to verify the substring is present before clicking delete. This catches URL hallucinations and copy-paste mistakes without adding an approval round-trip.
+- `x_delete_tweet` is the only irreversible action with a built-in safety guard: the caller must pass a substring of the tweet body as `text_must_match`, and the host script reads the live tweet to verify the substring is present before clicking delete. This catches URL hallucinations and copy-paste mistakes, on top of the owner-approval hold.
 - DM bodies are redacted from `nanoclaw.log`.
-- Posting / liking / following / deleting are not approval-gated. If you want admin approval gating per action, model it as a separate skill that wraps these tools — don't add an approval flag here.
+- Deleting, unfollowing, retweeting and un-retweeting are held for owner approval (see the note at the top). Reads, posting, replying, liking, bookmarking, following, DMs and the list tools run without approval.
 - The MCP tools ship via the runner once installed, so all agent groups see them. Finer-grained per-group gating is a future addition.
