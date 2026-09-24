@@ -1,8 +1,8 @@
 /**
  * X-integration host module (NanoClaw v2).
  *
- * Registers 24 delivery-action handlers (see agent.ts for the full
- * tool list — read, compose, engage, schedule, DM). Each handler:
+ * Registers 29 delivery-action handlers (see agent.ts for the full
+ * tool list — read, compose, engage, schedule, DM, lists). Each handler:
  *   1. Validates the inbound system payload.
  *   2. Goes through pacedRun() — a single host-process Promise chain
  *      that enforces a 10-second floor between sequential X actions.
@@ -330,3 +330,56 @@ registerDeliveryAction('x_send_dm', makeXHandler({
   buildArgs: (c) => ({ handle: c.handle, content: c.content }),
   redactLogs: true,
 }));
+
+// Lists — create/edit need no approval, same trust level as x_follow: they
+// change the user's account but are fully reversible by the agent itself
+// (rename back, re-add a member). There is deliberately no list-delete tool.
+registerDeliveryAction(
+  'x_read_my_lists',
+  makeXHandler({ action: 'x_read_my_lists', scriptName: 'read-my-lists', buildArgs: () => ({}) }),
+);
+registerDeliveryAction(
+  'x_read_list_members',
+  makeXHandler({
+    action: 'x_read_list_members',
+    scriptName: 'read-list-members',
+    required: ['list'],
+    buildArgs: (c) => ({ list: c.list, limit: c.limit ?? 50 }),
+  }),
+);
+registerDeliveryAction(
+  'x_create_list',
+  makeXHandler({
+    action: 'x_create_list',
+    scriptName: 'create-list',
+    required: ['name'],
+    buildArgs: (c) => ({ name: c.name, description: c.description ?? null, private: c.private === true }),
+  }),
+);
+registerDeliveryAction(
+  'x_update_list',
+  makeXHandler({
+    action: 'x_update_list',
+    scriptName: 'update-list',
+    required: ['list'],
+    buildArgs: (c) => ({
+      list: c.list,
+      name: c.name ?? null,
+      description: c.description ?? null,
+      private: typeof c.private === 'boolean' ? c.private : null,
+    }),
+  }),
+);
+registerDeliveryAction(
+  'x_edit_list_members',
+  makeXHandler({
+    action: 'x_edit_list_members',
+    scriptName: 'edit-list-members',
+    required: ['list'],
+    buildArgs: (c) => ({
+      list: c.list,
+      add: Array.isArray(c.add) ? c.add : [],
+      remove: Array.isArray(c.remove) ? c.remove : [],
+    }),
+  }),
+);

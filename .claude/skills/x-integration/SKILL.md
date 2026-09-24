@@ -59,12 +59,23 @@ MCP tools that automate every common X action through *your real browser* (Chrom
 |------|------|--------------|
 | `x_export_bookmarks` | `reset?` | Resumable bulk-dump of all bookmarks to CSV at `/workspace/group/captures/bookmarks.csv`. Each call scrolls for ~75 seconds (well under the 120s host script timeout) and appends new rows; a sidecar `.progress.json` file records the last exported tweet ID. For users with thousands of bookmarks, the agent calls this in a loop until the response says "End of bookmarks reached." Pass `reset=true` to truncate the CSV and start fresh. CSV columns: `id, url, author_handle, author_name, timestamp, text, image_alt_texts, likes, retweets, replies, is_reply, is_retweet`. RFC 4180 quoting. |
 
+### Lists (5)
+| Tool | Args | What it does |
+|------|------|--------------|
+| `x_read_my_lists` | — | Your own lists: name, URL, public/private, member count, description. Call first to get a list's URL. |
+| `x_read_list_members` | `list`, `limit?` (≤200) | Handles + display names of the people on a list. |
+| `x_create_list` | `name` (≤25), `description?` (≤100), `private?` | Create a list (public by default). Refuses a name you already use for another list. Returns the new URL. |
+| `x_update_list` | `list`, `name?`, `description?`, `private?` | Rename, change/clear the description, or flip public↔private. Only passed fields change; reads the dialog back to verify. |
+| `x_edit_list_members` | `list`, `add?[]`, `remove?[]` | Add/remove people by handle, ≤8 per call (~10s each). Goes through each person's profile → More → "Add/remove from Lists", so people are matched by exact handle. Per-handle result lines. Adding someone to a **public** list notifies them. |
+
+`list` accepts a list URL, its numeric ID, or the exact name of one of your lists. Because X's "Add/remove from Lists" picker shows only names, the list tools refuse duplicate list names. There is deliberately no delete-list tool; delete by hand in X (Edit List → Delete List).
+
 ## How it works
 
 | Layer | Where | What |
 |-------|-------|------|
 | Container MCP tool | `container/agent-runner/src/mcp-tools/x-integration.ts` | Each tool writes a `kind:'system'` row to `messages_out` with `{ action, requestId, ...args }` and returns immediately ("submitted; result will arrive shortly"). |
-| Host delivery action | `src/modules/x-integration/index.ts` | `registerDeliveryAction('x_*', …)` for 24 actions. Each handler routes through `pacedRun()` (a single host-process Promise chain that enforces a **10-second floor between any two X actions** — protects the account from anti-spam tripping). Then spawns the matching `scripts/<name>.ts` via `tsx`, awaits exit, calls `notifyAgent(session, result)` to write the outcome back into `inbound.db` (which also wakes the container). |
+| Host delivery action | `src/modules/x-integration/index.ts` | `registerDeliveryAction('x_*', …)` for 29 actions. Each handler routes through `pacedRun()` (a single host-process Promise chain that enforces a **10-second floor between any two X actions** — protects the account from anti-spam tripping). Then spawns the matching `scripts/<name>.ts` via `tsx`, awaits exit, calls `notifyAgent(session, result)` to write the outcome back into `inbound.db` (which also wakes the container). |
 | Browser scripts | `.claude/skills/x-integration/scripts/<name>.ts` | Playwright + your persistent browser profile at `data/x-browser-profile/`. Reads JSON from stdin, writes a `ScriptResult` JSON line to stdout. |
 | DOM glue | `lib/locators.ts`, `lib/extract.ts` | Every CSS / data-testid selector AND every tweet/profile/DM parser is centralized. When X breaks something, *that's* the only place to update. |
 
@@ -187,6 +198,11 @@ Cancel scheduled tweet #2.
 What DMs are in my inbox?
 Read my DM thread with @<friend>.
 DM @<friend>: thanks for the link earlier.
+
+What X lists do I have?
+Make a private list called "Local growers" and add @foo and @bar.
+Rename my "Medicine 3.0" list to "Healthspan" and make it private.
+Take @baz off my Tesla investors club list.
 ```
 
 Each command produces (a) one acknowledgment from the agent, (b) a follow-up with the result ~10–60s later.
@@ -234,6 +250,8 @@ DMs are sensitive. Three protections shipped:
 | DM char limit | `lib/config.ts` `limits.dmMaxLength` | 10000 |
 | Read result cap | `lib/config.ts` `limits.readMax` | 50 |
 | Media per tweet | `lib/config.ts` `limits.mediaMaxPerTweet` | 4 |
+| Handles per `x_edit_list_members` call | `lib/config.ts` `limits.listMembersPerCall` | 8 |
+| `x_read_list_members` cap | `lib/config.ts` `limits.listMembersReadMax` | 200 |
 | **Action pacing** | `lib/config.ts` `pacing.actionDelayMs` | **10000 (10s)** |
 | Per-action timeout | `host.ts` `SCRIPT_TIMEOUT_MS` | 120s |
 | Failure dump dir | `lib/config.ts` `failureDumpDir` | `logs/x-failures/` |
@@ -277,7 +295,12 @@ DMs are sensitive. Three protections shipped:
     ├── cancel-scheduled.ts   # x_cancel_scheduled
     ├── read-dm-inbox.ts      # x_read_dm_inbox
     ├── read-dm-thread.ts     # x_read_dm_thread
-    └── send-dm.ts            # x_send_dm
+    ├── send-dm.ts            # x_send_dm
+    ├── read-my-lists.ts      # x_read_my_lists
+    ├── read-list-members.ts  # x_read_list_members
+    ├── create-list.ts        # x_create_list
+    ├── update-list.ts        # x_update_list
+    └── edit-list-members.ts  # x_edit_list_members
 ```
 
 ## Security

@@ -114,6 +114,28 @@ export const X_SELECTORS = {
   caret: '[data-testid="caret"]',
   /** Dropdown menu items in the caret-opened action menu. Filter by inner text in the script. */
   dropdownMenuItem: '[data-testid="Dropdown"] [role="menuitem"]',
+
+  // ─── Lists (verified against live DOM 2026-09-23) ─────────
+  /** "More" (three-dot) button on a profile page — opens the user-actions menu. */
+  userActions: '[data-testid="userActions"]',
+  /** List row. In the "Add/remove from Lists" picker it is role=checkbox with aria-checked. */
+  listCell: '[data-testid="listCell"]',
+  /** Name input in the create-list and edit-list dialogs (maxlength 25). */
+  listNameInput: '[role="dialog"] input[name="name"]',
+  /** Description textarea in the create-list and edit-list dialogs (maxlength 100). */
+  listDescriptionInput: '[role="dialog"] textarea[name="description"]',
+  /** "Make private" checkbox in the create-list and edit-list dialogs. */
+  listPrivateCheckbox: '[role="dialog"] input[type="checkbox"]',
+  /** "Next" button in the create-list dialog (creates the list). */
+  listCreateNextButton: '[role="dialog"] [role="button"][aria-label="Next"]',
+  /** "Done" button in the edit-list dialog (disabled until something changes). */
+  listEditDoneButton: '[role="dialog"] [role="button"][aria-label="Done"]',
+  /** "Save" button in the "Add/remove from Lists" picker (disabled until something changes). */
+  listPickerSaveButton: '[role="dialog"] [role="button"]:has-text("Save")',
+  /** Member row in the list-members dialog. innerText carries "@handle". */
+  listMemberCell: '[role="dialog"] [data-testid="UserCell"]',
+  /** Dialog close button. */
+  dialogClose: '[data-testid="app-bar-close"]',
 };
 
 /**
@@ -140,6 +162,17 @@ export const X_URLS = {
 
   /** Universal tweet permalink (handle-agnostic — X redirects). */
   tweetById: (tweetId: string) => `https://x.com/i/status/${tweetId}`,
+
+  /** A list's timeline page. */
+  list: (listId: string) => `https://x.com/i/lists/${listId}`,
+  /** Edit-list dialog (name / description / private). */
+  listEdit: (listId: string) => `https://x.com/i/lists/${listId}/info`,
+  /** List members dialog. */
+  listMembers: (listId: string) => `https://x.com/i/lists/${listId}/members`,
+  /** Create-list dialog. */
+  listCreate: 'https://x.com/i/lists/create',
+  /** A user's Lists page (their own lists + lists they follow). */
+  userLists: (handle: string) => `https://x.com/${handle.replace(/^@/, '')}/lists`,
 
   /** Search query URL. */
   search: (query: string, latest = false) => {

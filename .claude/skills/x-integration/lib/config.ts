@@ -52,6 +52,15 @@ export const config = {
     readMax: 50,
     /** Cap on attached images per tweet (X UI allows 4). */
     mediaMaxPerTweet: 4,
+    /** X list name cap (the create/edit dialog enforces maxlength=25). */
+    listNameMaxLength: 25,
+    /** X list description cap (maxlength=100 in the dialog). */
+    listDescriptionMaxLength: 100,
+    /** Handles per x_edit_list_members call. Each one is a separate
+     * profile visit (~8–10s), so this keeps a call under the 120s timeout. */
+    listMembersPerCall: 8,
+    /** Cap for x_read_list_members (X lists hold up to 5,000; this stays under the timeout). */
+    listMembersReadMax: 200,
   },
 
   // Pacing — minimum wall-clock spacing between sequential X actions.

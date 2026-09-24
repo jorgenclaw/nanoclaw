@@ -12,6 +12,8 @@
  *   - Schedule (2): x_list_scheduled, x_cancel_scheduled
  *   - DM (3):     x_read_dm_inbox, x_read_dm_thread, x_send_dm
  *   - Bulk (1):   x_export_bookmarks (resumable CSV dump)
+ *   - Lists (5):  x_read_my_lists, x_read_list_members, x_create_list,
+ *                  x_update_list, x_edit_list_members
  *
  * Safety on x_delete_tweet: tool requires a `text_must_match` substring of
  * the tweet body. The host script reads the live tweet and refuses to
@@ -41,6 +43,10 @@ const READ_MAX = 50;
  *  re-scroll cost per call, so larger batches amortize better. */
 const BOOKMARKS_READ_MAX = 100;
 const MEDIA_MAX = 4;
+const LIST_NAME_MAX = 25;
+const LIST_DESCRIPTION_MAX = 100;
+const LIST_MEMBERS_PER_CALL = 8;
+const LIST_MEMBERS_READ_MAX = 200;
 
 function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -594,6 +600,138 @@ export const xExportBookmarks = makeXTool({
   buildPayload: (args) => ({ reset: args.reset === true }),
 });
 
+// ── Lists ───────────────────────────────────────────────────
+
+const listRefSchema = {
+  type: 'string',
+  description: 'The list: its URL (https://x.com/i/lists/123…), its numeric ID, or the exact name of one of your lists.',
+};
+
+export const xReadMyLists = makeXTool({
+  name: 'x_read_my_lists',
+  description: 'List the user\'s own X lists — name, URL, public/private, member count, description. Call this first to get a list\'s URL before editing it.',
+  action: 'x_read_my_lists',
+  inputSchema: { type: 'object' as const, properties: {} },
+});
+
+export const xReadListMembers = makeXTool({
+  name: 'x_read_list_members',
+  description: 'List the people (handles + display names) on an X list.',
+  action: 'x_read_list_members',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      list: listRefSchema,
+      limit: { type: 'number', description: `Max members to return (1–${LIST_MEMBERS_READ_MAX}, default 50).` },
+    },
+    required: ['list'],
+  },
+  validate: (a) => {
+    if (!a.list) return 'list is required.';
+    if (a.limit !== undefined) {
+      const n = a.limit as number;
+      if (!Number.isInteger(n) || n < 1 || n > LIST_MEMBERS_READ_MAX) return `limit must be an integer between 1 and ${LIST_MEMBERS_READ_MAX}.`;
+    }
+    return null;
+  },
+  buildPayload: (args) => ({ list: args.list, limit: args.limit ?? 50 }),
+});
+
+function validateListFields(a: Record<string, unknown>): string | null {
+  if (a.name !== undefined && a.name !== null) {
+    if (typeof a.name !== 'string' || a.name.trim().length === 0) return 'name cannot be empty.';
+    if (a.name.trim().length > LIST_NAME_MAX) return `name exceeds ${LIST_NAME_MAX} characters (current: ${a.name.trim().length}).`;
+  }
+  if (a.description !== undefined && a.description !== null) {
+    if (typeof a.description !== 'string') return 'description must be a string.';
+    if (a.description.trim().length > LIST_DESCRIPTION_MAX) return `description exceeds ${LIST_DESCRIPTION_MAX} characters (current: ${a.description.trim().length}).`;
+  }
+  if (a.private !== undefined && a.private !== null && typeof a.private !== 'boolean') return 'private must be a boolean.';
+  return null;
+}
+
+export const xCreateList = makeXTool({
+  name: 'x_create_list',
+  description:
+    'Create a new X list on the user\'s account. Public by default — pass private=true for a list only the user can see. ' +
+    'Refuses a name the user already uses for another list. Returns the new list\'s URL; add people afterwards with x_edit_list_members.',
+  action: 'x_create_list',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      name: { type: 'string', description: `List name (max ${LIST_NAME_MAX} chars).` },
+      description: { type: 'string', description: `Optional description (max ${LIST_DESCRIPTION_MAX} chars).` },
+      private: { type: 'boolean', description: 'true = private (only the user sees it). Default false (public).' },
+    },
+    required: ['name'],
+  },
+  validate: (a) => (a.name ? validateListFields(a) : 'name is required.'),
+  buildPayload: (args) => ({ name: args.name, description: args.description ?? null, private: args.private === true }),
+});
+
+export const xUpdateList = makeXTool({
+  name: 'x_update_list',
+  description:
+    'Edit one of the user\'s X lists: rename it, change its description (pass "" to clear), or switch it between public and private. ' +
+    'Only the fields you pass are changed. To change who is on the list, use x_edit_list_members.',
+  action: 'x_update_list',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      list: listRefSchema,
+      name: { type: 'string', description: `New name (max ${LIST_NAME_MAX} chars).` },
+      description: { type: 'string', description: `New description (max ${LIST_DESCRIPTION_MAX} chars; "" clears it).` },
+      private: { type: 'boolean', description: 'true = make private, false = make public.' },
+    },
+    required: ['list'],
+  },
+  validate: (a) => {
+    if (!a.list) return 'list is required.';
+    if (a.name === undefined && a.description === undefined && a.private === undefined) {
+      return 'Pass at least one of name, description, private.';
+    }
+    return validateListFields(a);
+  },
+  buildPayload: (args) => ({
+    list: args.list,
+    name: args.name ?? null,
+    description: args.description ?? null,
+    private: args.private ?? null,
+  }),
+});
+
+export const xEditListMembers = makeXTool({
+  name: 'x_edit_list_members',
+  description:
+    `Add and/or remove people on one of the user's X lists, by handle. Up to ${LIST_MEMBERS_PER_CALL} handles per call (add + remove combined); ` +
+    'split bigger changes into several calls. Each handle takes ~10s. Adding someone to a PUBLIC list notifies them on X. ' +
+    'The result reports each handle separately (added / removed / already there / failed).',
+  action: 'x_edit_list_members',
+  inputSchema: {
+    type: 'object' as const,
+    properties: {
+      list: listRefSchema,
+      add: { type: 'array', items: { type: 'string' }, description: 'Handles to add (with or without @).' },
+      remove: { type: 'array', items: { type: 'string' }, description: 'Handles to remove (with or without @).' },
+    },
+    required: ['list'],
+  },
+  validate: (a) => {
+    if (!a.list) return 'list is required.';
+    for (const key of ['add', 'remove'] as const) {
+      const v = a[key];
+      if (v !== undefined && (!Array.isArray(v) || v.some((h) => typeof h !== 'string' || h.trim().length === 0))) {
+        return `${key} must be an array of handles.`;
+      }
+    }
+    const total = ((a.add as string[] | undefined)?.length ?? 0) + ((a.remove as string[] | undefined)?.length ?? 0);
+    if (total === 0) return 'Pass at least one handle in add or remove.';
+    if (total > LIST_MEMBERS_PER_CALL) return `At most ${LIST_MEMBERS_PER_CALL} handles per call (got ${total}). Split into several calls.`;
+    return null;
+  },
+  buildPayload: (args) => ({ list: args.list, add: args.add ?? [], remove: args.remove ?? [] }),
+});
+
 // ── Register all tools ──────────────────────────────────────
 
 registerTools([
@@ -605,4 +743,5 @@ registerTools([
   xListScheduled, xCancelScheduled,
   xReadDmInbox, xReadDmThread, xSendDm,
   xExportBookmarks,
+  xReadMyLists, xReadListMembers, xCreateList, xUpdateList, xEditListMembers,
 ]);
