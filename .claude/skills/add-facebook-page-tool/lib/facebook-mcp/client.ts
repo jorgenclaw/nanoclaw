@@ -70,11 +70,14 @@ const createClient = () => {
     // in-flight header injection work (the real token is swapped in by the
     // proxy; whatever value is in FACEBOOK_PAGE_ACCESS_TOKEN locally never
     // needs to be the real secret).
+    // NanoClaw patch: a FormData body (photo/video upload) must let fetch set
+    // its own multipart Content-Type with the boundary, so skip the JSON one.
+    const isForm = options.body instanceof FormData;
     const url = new URL(`${BASE_URL}${endpoint}`);
     const response = await fetch(url.toString(), {
       ...options,
       headers: {
-        "Content-Type": "application/json",
+        ...(isForm ? {} : { "Content-Type": "application/json" }),
         Authorization: `Bearer ${config.pageAccessToken}`,
         ...options.headers,
       },

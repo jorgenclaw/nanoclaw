@@ -6,9 +6,10 @@ description: Add Facebook Page posting, scheduling, comment reading/replying, an
 # Add Facebook Page Tool
 
 Gives an agent group `facebook_create_post`, `facebook_schedule_post`,
-`facebook_delete_post`, `facebook_get_posts`, `facebook_get_comments`,
+`facebook_edit_post`, `facebook_delete_post`, `facebook_get_posts`, `facebook_get_comments`,
 `facebook_reply_comment`, `facebook_hide_comment`, and `facebook_get_insights`
-tools for one or more Facebook Business Pages, via the Graph API.
+tools for one or more Facebook Business Pages, via the Graph API. Posts can
+carry a link, a public image URL, or a local photo or video file (`media_path`).
 
 **This is the posting/polling half only.** It does not receive live
 webhook push events (new comments, Messenger DMs) — comments are read by
@@ -68,7 +69,7 @@ cp -r .claude/skills/add-facebook-page-tool/lib/facebook-mcp \
 Verify:
 
 ```bash
-find container/agent-runner/src/facebook-mcp -name '*.ts' | wc -l   # 20 (15 source + 5 test)
+find container/agent-runner/src/facebook-mcp -name '*.ts' | wc -l   # 23 (17 source + 6 test)
 ```
 
 Run the tests and typecheck (both must pass — this is real vendored source,

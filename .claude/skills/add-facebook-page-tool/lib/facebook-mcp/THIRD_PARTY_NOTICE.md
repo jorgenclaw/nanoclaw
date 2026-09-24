@@ -71,12 +71,19 @@ endpoints) need to be applied here by hand.
    `[Page: <label>]` so an agent with one server per Page knows which Page
    each tool acts on.
 
-## Known limitation carried over from upstream
+8. **`tools/edit-post.ts`** (new) — `facebook_edit_post`: change a post's
+   text in place (`POST /{post-id}` with `message`), keeping its comments.
+   The Graph API can't change a published post's link or attachment.
+9. **`utils/media.ts`** (new) + **`create-post.ts`**, **`schedule-post.ts`**,
+   **`client.ts`** — `media_path`: upload a local photo or video file via
+   `POST /{page-id}/photos` or `/{page-id}/videos` (multipart), published now
+   or scheduled. `client.ts` leaves the Content-Type to fetch for a FormData
+   body. Audio is rejected with an explanation: Facebook has no audio post.
 
-`facebook_create_post`'s `picture` argument only accepts a URL to an
-already-public image (Graph API's `/feed?picture=` shares a hosted image, it
-does not upload one). There is no local-file binary upload
-(`POST /{page-id}/photos` with multipart form data) — upstream never
-implemented it and this vendor pass didn't add it. If posting images that
-don't already have a public URL turns out to matter, that's a real follow-up,
-not something silently handled today.
+## Not possible through the Graph API (checked 2026-09-24)
+
+- **Pinning a post.** v25 has no `is_pinned` field; `POST /{post-id}` with
+  `is_pinned` returns "(#100) You do not have sufficient permissions".
+- Who-can-comment settings, turning off post notifications, partnership-ad
+  codes and turning off translations are facebook.com menu items with no
+  Graph API equivalent.

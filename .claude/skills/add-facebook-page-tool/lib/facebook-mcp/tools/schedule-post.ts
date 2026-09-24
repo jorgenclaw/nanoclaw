@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { FacebookClient } from "../client.js";
 import { wrapToolHandler } from "../utils/error-handler.js";
+import { uploadMedia } from "../utils/media.js";
 
 // 10 minutes minimum, 6 months maximum scheduling window
 const MIN_SCHEDULE_MS = 10 * 60 * 1000;
@@ -11,7 +12,7 @@ const MAX_SCHEDULE_MS = 6 * 30 * 24 * 60 * 60 * 1000;
 const register = (server: McpServer, client: FacebookClient) => {
   server.tool(
     "facebook_schedule_post",
-    "Schedule a Facebook Page post for a future time. The scheduled_time must be between 10 minutes and 6 months from now (ISO 8601 format).",
+    "Schedule a Facebook Page post for a future time. The scheduled_time must be between 10 minutes and 6 months from now (ISO 8601 format). Can include a link, or a local photo or video file (media_path).",
     {
       message: z
         .string()
@@ -27,6 +28,12 @@ const register = (server: McpServer, client: FacebookClient) => {
         .url()
         .optional()
         .describe("Optional URL to attach to the post"),
+      media_path: z
+        .string()
+        .optional()
+        .describe(
+          "Optional local photo or video file to upload with the post, e.g. /workspace/group/photo.jpg. Photos: jpg png gif webp. Videos: mp4 mov webm. Can't be combined with link.",
+        ),
     },
     async (args) =>
       wrapToolHandler(async () => {
@@ -55,6 +62,21 @@ const register = (server: McpServer, client: FacebookClient) => {
         const scheduledPublishTime = Math.floor(
           scheduledDate.getTime() / 1000,
         ).toString();
+
+        if (args.media_path) {
+          if (args.link) {
+            throw new Error(
+              "media_path can't be combined with link. Put the link in the message text instead.",
+            );
+          }
+          const result = await uploadMedia(client, args.media_path, {
+            message: args.message,
+            scheduledPublishTime,
+          });
+          return {
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          };
+        }
 
         const { pageId } = client.config;
         const body: Record<string, string> = {

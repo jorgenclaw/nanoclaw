@@ -3,6 +3,7 @@ import type { FacebookClient } from "../client.js";
 import { register as registerCreatePost } from "./create-post.js";
 import { register as registerSchedulePost } from "./schedule-post.js";
 import { register as registerDeletePost } from "./delete-post.js";
+import { register as registerEditPost } from "./edit-post.js";
 import { register as registerGetPosts } from "./get-posts.js";
 import { register as registerGetComments } from "./get-comments.js";
 import { register as registerReplyComment } from "./reply-comment.js";
@@ -14,6 +15,7 @@ const registerAllTools = (server: McpServer, client: FacebookClient): void => {
   registerCreatePost(server, client);
   registerSchedulePost(server, client);
   registerDeletePost(server, client);
+  registerEditPost(server, client);
   registerGetPosts(server, client);
   registerGetComments(server, client);
   registerReplyComment(server, client);
