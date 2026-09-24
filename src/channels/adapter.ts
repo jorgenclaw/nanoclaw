@@ -258,3 +258,18 @@ export interface ChannelRegistration {
     env?: Record<string, string>;
   };
 }
+
+/**
+ * Thrown by an adapter's deliver() when its platform connection is down.
+ * Delivery treats it as "not yet", not as a failed attempt: the message
+ * stays undelivered in outbound.db and goes out on a later poll once the
+ * adapter reconnects. Adapters must throw this instead of holding the
+ * message in memory — an in-memory hold is lost on host restart while
+ * delivery has already marked the row delivered.
+ */
+export class ChannelDisconnectedError extends Error {
+  constructor(public readonly channelType: string) {
+    super(`${channelType} not connected`);
+    this.name = 'ChannelDisconnectedError';
+  }
+}

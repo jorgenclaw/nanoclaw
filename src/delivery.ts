@@ -33,7 +33,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import type { OutboundFile } from './channels/adapter.js';
+import { ChannelDisconnectedError, type OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -53,6 +53,12 @@ const MAX_DELIVERY_ATTEMPTS = 3;
  * line pointing at it, instead of staying wedged forever.
  */
 export const DRAIN_WATCHDOG_MS = 120_000;
+
+/**
+ * Messages currently held because their channel is disconnected, so the
+ * "waiting" line is logged once per message rather than on every poll.
+ */
+const heldForDisconnect = new Set<string>();
 
 /** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
 const deliveryAttempts = new Map<string, number>();
@@ -247,6 +253,7 @@ async function drainSession(session: Session): Promise<void> {
         const platformMsgId = await deliverMessage(msg, session, inDb);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
         deliveryAttempts.delete(msg.id);
+        heldForDisconnect.delete(msg.id);
 
         // Pause the typing indicator after a real user-facing message
         // lands on the user's screen, so the client has time to visually
@@ -258,6 +265,19 @@ async function drainSession(session: Session): Promise<void> {
           pauseTypingRefreshAfterDelivery(session.id);
         }
       } catch (err) {
+        if (err instanceof ChannelDisconnectedError) {
+          // Not an attempt: leave the row undelivered and retry on a later
+          // poll once the channel reconnects, however long that takes.
+          if (!heldForDisconnect.has(msg.id)) {
+            heldForDisconnect.add(msg.id);
+            log.warn('Channel disconnected — message held in outbound.db until it reconnects', {
+              messageId: msg.id,
+              sessionId: session.id,
+              channelType: err.channelType,
+            });
+          }
+          continue;
+        }
         const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
         deliveryAttempts.set(msg.id, attempts);
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {

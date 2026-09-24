@@ -8,6 +8,7 @@ import { ASSISTANT_NAME, SIGNAL_CLI_TCP_HOST, SIGNAL_CLI_TCP_PORT, SIGNAL_PHONE_
 import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import { ChannelDisconnectedError } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 interface JsonRpcRequest {
@@ -187,8 +188,6 @@ function createSignalAdapter(): ChannelAdapter | null {
   let connected = false;
   let buffer = '';
   let rpcId = 1;
-  let outgoingQueue: Array<{ platformId: string; text: string; attachments?: string[] }> = [];
-  let flushing = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempts = 0;
   let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -225,39 +224,6 @@ function createSignalAdapter(): ChannelAdapter | null {
 
   function sendRpcFireAndForget(method: string, params?: Record<string, unknown>): void {
     sendRpc(method, params).catch((err) => log.warn('RPC fire-and-forget error', { method, err }));
-  }
-
-  function sendToSignal(platformId: string, text: string, attachments?: string[]): Promise<unknown> {
-    const isGroup = platformId.startsWith('group.');
-    const params: Record<string, unknown> = {
-      account: SIGNAL_PHONE_NUMBER,
-      message: text,
-    };
-    if (attachments?.length) params.attachment = attachments;
-    if (isGroup) {
-      params.groupId = platformId.slice('group.'.length);
-    } else {
-      params.recipient = [platformId];
-    }
-    return sendRpc('send', params);
-  }
-
-  async function flushOutgoingQueue(): Promise<void> {
-    if (flushing || outgoingQueue.length === 0) return;
-    flushing = true;
-    try {
-      log.info('Flushing outgoing Signal queue', { count: outgoingQueue.length });
-      while (outgoingQueue.length > 0) {
-        const item = outgoingQueue.shift()!;
-        try {
-          await sendToSignal(item.platformId, item.text, item.attachments);
-        } catch (err) {
-          log.error('Failed to send queued Signal message', { platformId: item.platformId, err });
-        }
-      }
-    } finally {
-      flushing = false;
-    }
   }
 
   function scheduleReconnect(): void {
@@ -414,7 +380,6 @@ function createSignalAdapter(): ChannelAdapter | null {
       log.info('Connected to signal-cli', { host: SIGNAL_CLI_TCP_HOST, port: SIGNAL_CLI_TCP_PORT });
 
       sendRpcFireAndForget('subscribeReceive', { account: SIGNAL_PHONE_NUMBER });
-      flushOutgoingQueue().catch((err) => log.error('Failed to flush outgoing queue', { err }));
 
       if (onFirstOpen) {
         onFirstOpen();
@@ -456,7 +421,7 @@ function createSignalAdapter(): ChannelAdapter | null {
         pending.reject(new Error('Signal socket closed'));
       }
       pendingRpc.clear();
-      log.info('signal-cli socket closed, reconnecting in 5s', { queuedMessages: outgoingQueue.length });
+      log.info('signal-cli socket closed, reconnecting in 5s');
       scheduleReconnect();
     });
 
@@ -538,6 +503,11 @@ function createSignalAdapter(): ChannelAdapter | null {
     },
 
     async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
+      // Leave the message in outbound.db until signal-cli is back — see
+      // ChannelDisconnectedError. Checked first so no attachment temp files
+      // are written for a send that can't happen.
+      if (!connected) throw new ChannelDisconnectedError('signal');
+
       const content = message.content as Record<string, unknown> | string | undefined;
 
       // Handle reaction messages
@@ -584,12 +554,6 @@ function createSignalAdapter(): ChannelAdapter | null {
       }
 
       if (!text && tmpFiles.length === 0) return undefined;
-
-      if (!connected) {
-        outgoingQueue.push({ platformId, text: text || '', attachments: tmpFiles.length > 0 ? tmpFiles : undefined });
-        log.info('Signal disconnected, message queued', { platformId, queueSize: outgoingQueue.length });
-        return undefined;
-      }
 
       const isGroup = platformId.startsWith('group.');
       const groupId = isGroup ? platformId.slice('group.'.length) : undefined;

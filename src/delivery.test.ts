@@ -38,6 +38,7 @@ import { getDeliveredIds } from './db/session-db.js';
 import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter, DRAIN_WATCHDOG_MS } from './delivery.js';
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
+import { ChannelDisconnectedError } from './channels/adapter.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -225,6 +226,44 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     expect(row).toBeDefined();
     expect(row!.status).toBe('failed');
     expect(row!.platform_message_id).toBeNull();
+  });
+
+  it('holds a message while the channel is disconnected, without spending attempts', async () => {
+    // Regression (2026-09-23): the Signal adapter used to push to an
+    // in-memory queue and return undefined while signal-cli was down, so the
+    // row was marked delivered and a host restart silently dropped it. Now
+    // the adapter throws ChannelDisconnectedError; the row must stay
+    // undelivered through any number of polls and go out on reconnect.
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-held');
+
+    let connected = false;
+    let callCount = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        callCount++;
+        if (!connected) throw new ChannelDisconnectedError('signal');
+        return 'plat-held';
+      },
+    });
+
+    // Well past MAX_DELIVERY_ATTEMPTS while disconnected
+    for (let i = 0; i < 5; i++) await deliverSessionMessages(session);
+    let inDb = openInboundDb('ag-1', session.id);
+    expect(getDeliveredIds(inDb).has('out-held')).toBe(false);
+    inDb.close();
+
+    connected = true;
+    await deliverSessionMessages(session);
+    inDb = openInboundDb('ag-1', session.id);
+    const row = inDb
+      .prepare('SELECT status, platform_message_id FROM delivered WHERE message_out_id = ?')
+      .get('out-held') as { status: string; platform_message_id: string | null } | undefined;
+    inDb.close();
+    expect(row?.status).toBe('delivered');
+    expect(row?.platform_message_id).toBe('plat-held');
+    expect(callCount).toBe(6);
   });
 
   it('clears attempt counter on successful delivery', async () => {
