@@ -11,6 +11,10 @@
  *   clawstr-post upvote <event-id>
  *   clawstr-post pubkey
  *   clawstr-post sign '{"kind":1,"content":"hello","tags":[]}'
+ *   clawstr-post accounts
+ *
+ * Any command accepts `--account <name>` (jorgenclaw | sjvg | sovereignty-by-design) to sign
+ * as that identity. Without it the daemon uses the default account (jorgenclaw).
  */
 
 import { connect } from 'net';
@@ -38,19 +42,27 @@ function daemonRequest(payload) {
   });
 }
 
+let account; // set from --account in main
+
 async function signEvent(kind, content, tags) {
   const res = await daemonRequest({
     method: 'sign_event',
-    params: { kind, content, tags },
+    params: { kind, content, tags, ...(account ? { account } : {}) },
   });
   if (res.error) throw new Error(res.error);
   return res.event;
 }
 
 async function getPubkey() {
-  const res = await daemonRequest({ method: 'get_public_key' });
+  const res = await daemonRequest({ method: 'get_public_key', params: account ? { account } : {} });
   if (res.error) throw new Error(res.error);
   return res.pubkey;
+}
+
+async function listAccounts() {
+  const res = await daemonRequest({ method: 'list_accounts' });
+  if (res.error) throw new Error(res.error);
+  return res.accounts;
 }
 
 // --- Relay publishing (lightweight, no dependencies) ---
@@ -170,7 +182,17 @@ async function cmdSign(jsonStr) {
 
 // --- Main ---
 
-const [,, cmd, ...args] = process.argv;
+const argv = process.argv.slice(2);
+const accountIdx = argv.indexOf('--account');
+if (accountIdx !== -1) {
+  account = argv[accountIdx + 1];
+  if (!account) {
+    console.error('Usage: --account <name>');
+    process.exit(1);
+  }
+  argv.splice(accountIdx, 2);
+}
+const [cmd, ...args] = argv;
 
 try {
   switch (cmd) {
@@ -179,8 +201,11 @@ try {
     case 'upvote':  await cmdUpvote(args[0], args[1]); break;
     case 'pubkey':  console.log(await getPubkey()); break;
     case 'sign':    await cmdSign(args[0]); break;
+    case 'accounts':
+      for (const a of await listAccounts()) console.log(`${a.name}${a.default ? ' (default)' : ''} ${a.pubkey}`);
+      break;
     default:
-      console.error('Commands: post, reply, upvote, pubkey, sign');
+      console.error('Commands: post, reply, upvote, pubkey, sign, accounts  (all accept --account <name>)');
       console.error('Example: clawstr-post post ai-freedom "Hello from the daemon!"');
       process.exit(1);
   }

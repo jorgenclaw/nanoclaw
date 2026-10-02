@@ -39,23 +39,57 @@ function logAlert(msg) {
   console.warn(`[nostr-signer] ALERT: ${msg}`);
 }
 
-// --- Load key from kernel keyring ---
-let secretKeyHex;
-try {
-  const keyId = execSync('keyctl search @u user nsec', { encoding: 'utf8' }).trim();
+// --- Load keys from kernel keyring ---
+// The default account (Jorgenclaw) uses the keyring key named `nsec` and is required.
+// Extra accounts are optional: each is a user key named `nostr:<account>` and is skipped
+// with a warning if absent. Only get_public_key and sign_event accept an `account` param;
+// DM and encryption methods always use the default key.
+const DEFAULT_ACCOUNT = 'jorgenclaw';
+const EXTRA_ACCOUNTS = ['sjvg', 'sovereignty-by-design'];
+
+function loadKey(description) {
+  const keyId = execSync(`keyctl search @u user ${description}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   const nsec = execSync(`keyctl print ${keyId}`, { encoding: 'utf8' }).trim();
   const decoded = decodeNsec(nsec);
   if (decoded.type !== 'nsec') throw new Error('Keyring value is not an nsec');
-  secretKeyHex = decoded.data;
+  return decoded.data;
+}
+
+const accounts = new Map(); // account name -> { secretKeyHex, pubkey }
+
+try {
+  const sk = loadKey('nsec');
+  accounts.set(DEFAULT_ACCOUNT, { secretKeyHex: sk, pubkey: getPublicKey(sk) });
   console.log('[nostr-signer] Key loaded from kernel keyring');
 } catch (err) {
   // NEVER log err.message — nostr-tools includes the raw key value in decode errors
-  console.error('[nostr-signer] Failed to load key from keyring. Ensure wn_nsec contains ONLY the nsec1... string (no extra lines or whitespace).');
+  console.error('[nostr-signer] Failed to load key from keyring. Ensure the `nsec` key contains ONLY the nsec1... string (no extra lines or whitespace).');
   process.exit(1);
 }
 
-const pubkey = getPublicKey(secretKeyHex);
-console.log(`[nostr-signer] Public key: ${pubkey}`);
+for (const name of EXTRA_ACCOUNTS) {
+  try {
+    const sk = loadKey(`nostr:${name}`);
+    accounts.set(name, { secretKeyHex: sk, pubkey: getPublicKey(sk) });
+  } catch {
+    // Same rule: never log err.message
+    console.warn(`[nostr-signer] Account "${name}" not loaded (no valid nostr:${name} key in keyring)`);
+  }
+}
+
+const { secretKeyHex, pubkey } = accounts.get(DEFAULT_ACCOUNT);
+for (const [name, acct] of accounts) {
+  console.log(`[nostr-signer] Public key (${name}): ${acct.pubkey}`);
+}
+
+/** Resolve the `account` request param; returns null for an unknown/unloaded account. */
+function resolveAccount(p) {
+  return accounts.get(p.account || DEFAULT_ACCOUNT) || null;
+}
+
+function unknownAccountError(p) {
+  return JSON.stringify({ error: `Unknown or unloaded account: ${p.account}. Loaded: ${[...accounts.keys()].join(', ')}` });
+}
 
 // Track legacy (no-token) usage to log deprecation
 let legacyWarningLogged = false;
@@ -73,7 +107,16 @@ async function handleRequest(data) {
     const req = JSON.parse(data);
 
     if (req.method === 'get_public_key') {
-      return JSON.stringify({ pubkey });
+      const p = req.params || {};
+      const acct = resolveAccount(p);
+      if (!acct) return unknownAccountError(p);
+      return JSON.stringify({ pubkey: acct.pubkey });
+    }
+
+    if (req.method === 'list_accounts') {
+      return JSON.stringify({
+        accounts: [...accounts].map(([name, acct]) => ({ name, pubkey: acct.pubkey, default: name === DEFAULT_ACCOUNT })),
+      });
     }
 
     // --- Session management ---
@@ -106,6 +149,8 @@ async function handleRequest(data) {
       const p = req.params || {};
       if (p.kind === undefined) return JSON.stringify({ error: 'Missing required field: kind' });
       if (p.content === undefined) return JSON.stringify({ error: 'Missing required field: content' });
+      const acct = resolveAccount(p);
+      if (!acct) return unknownAccountError(p);
 
       // Session validation (if token provided)
       if (p.session_token) {
@@ -136,7 +181,7 @@ async function handleRequest(data) {
         created_at: p.created_at || Math.floor(Date.now() / 1000),
       };
 
-      const signedEvent = finalizeEvent(eventTemplate, secretKeyHex);
+      const signedEvent = finalizeEvent(eventTemplate, acct.secretKeyHex);
       return JSON.stringify({ event: signedEvent });
     }
 
