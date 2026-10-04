@@ -3,7 +3,6 @@ import fs from 'fs';
 import path from 'path';
 import { connect } from 'net';
 
-import WebSocket from 'ws';
 import { useWebSocketImplementation, SimplePool } from 'nostr-tools/pool';
 
 import { GROUPS_DIR, NOSTR_DM_ALLOWLIST, NOSTR_DM_RELAYS, NOSTR_SIGNER_SOCKET, PROJECT_ROOT } from '../config.js';
@@ -12,6 +11,7 @@ import { reportError, clearAlert } from '../health.js';
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelRegistration, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { GuardedWebSocket } from './nostr-relay-socket.js';
 
 interface NostrEvent {
   id: string;
@@ -304,7 +304,7 @@ function createNostrDMAdapter(): ChannelAdapter | null {
       if (res.error) throw new Error(`Signer error: ${res.error}`);
       ownPubkey = res.pubkey as string;
 
-      useWebSocketImplementation(WebSocket);
+      useWebSocketImplementation(GuardedWebSocket);
       pool = new SimplePool();
       subscribe();
 

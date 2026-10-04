@@ -185,12 +185,7 @@ const walletScript = path.join(projectRoot, 'tools/nwc-wallet/index.js');
 const NWC_CONFIG_PATH = process.env.NWC_CONFIG || path.join(projectRoot, 'groups/main/config/nwc.json');
 const NWC_SPENDING_PATH = process.env.NWC_SPENDING || path.join(projectRoot, 'groups/main/config/mcp-spending.json');
 const DEFAULT_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
-const ATTESTATION_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
-  'wss://relay.primal.net',
-];
+const ATTESTATION_RELAYS = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.primal.net'];
 const OUR_PUBKEY = 'd0514175a31de1942812597ee4e3f478b183f7f35fb73ee66d8c9f57485544e4';
 
 // --- Signing daemon ---
@@ -283,7 +278,7 @@ async function publishToRelays(event: Record<string, unknown>, relays: string[])
 
 // --- Relay query ---
 
-const QUERY_RELAYS = ['wss://nos.lol', 'wss://relay.nostr.band'];
+const QUERY_RELAYS = ['wss://nos.lol', 'wss://relay.primal.net'];
 
 async function queryRelays(filter: Record<string, unknown>, limit: number = 20): Promise<Record<string, unknown>[]> {
   const { default: WebSocket } = await import('ws');

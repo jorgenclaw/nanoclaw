@@ -198,7 +198,7 @@ export const NOSTR_SIGNER_SOCKET =
 export const NOSTR_DM_RELAYS = (
   process.env.NOSTR_DM_RELAYS ||
   envConfig.NOSTR_DM_RELAYS ||
-  'wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band'
+  'wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net'
 ).split(',');
 export const NOSTR_DM_ALLOWLIST = new Set(
   (process.env.NOSTR_DM_ALLOWLIST || envConfig.NOSTR_DM_ALLOWLIST || '').split(',').filter(Boolean),
