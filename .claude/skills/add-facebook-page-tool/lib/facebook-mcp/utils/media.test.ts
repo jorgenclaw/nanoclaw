@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "../client.js";
-import { detectMedia, uploadMedia } from "./media.js";
+import { detectMedia, uploadMedia, uploadPhotoPost } from "./media.js";
 
 const ORIGINAL_ENV = { ...process.env };
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -93,5 +93,94 @@ describe("uploadMedia", () => {
       uploadMedia(createClient(), tempFile("big.jpg", 11 * 1024 * 1024), {}),
     ).rejects.toThrow(/limit is 10 MB/);
     expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("uploadPhotoPost", () => {
+  const photoThenFeed = () => {
+    let n = 0;
+    return mock(async (url: string) =>
+      new Response(JSON.stringify(String(url).includes("/feed") ? { id: "12345_99" } : { id: `p${++n}` })),
+    );
+  };
+
+  test("uploads each photo unpublished, then one feed post attaching them all", async () => {
+    const fetchMock = photoThenFeed();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await uploadPhotoPost(createClient(), [tempFile("a.jpg"), tempFile("b.png"), tempFile("c.webp")], {
+      message: "market day",
+    });
+
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    expect(calls).toHaveLength(4);
+    for (const [url, options] of calls.slice(0, 3)) {
+      expect(url).toContain("/12345/photos");
+      const form = options.body as FormData;
+      expect(form.get("published")).toBe("false");
+      expect(form.has("temporary")).toBe(false);
+      expect(form.has("message")).toBe(false);
+    }
+    const [feedUrl, feedOptions] = calls[3];
+    expect(feedUrl).toContain("/12345/feed");
+    const body = JSON.parse(feedOptions.body as string);
+    expect(body.message).toBe("market day");
+    expect(body.attached_media).toEqual([{ media_fbid: "p1" }, { media_fbid: "p2" }, { media_fbid: "p3" }]);
+    expect(body.published).toBeUndefined();
+    expect(result).toMatchObject({ id: "12345_99", photo_ids: ["p1", "p2", "p3"] });
+  });
+
+  test("a scheduled post uploads temporary photos and schedules the feed post", async () => {
+    const fetchMock = photoThenFeed();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await uploadPhotoPost(createClient(), [tempFile("a.jpg"), tempFile("b.jpg")], {
+      message: "soon",
+      scheduledPublishTime: "1800000000",
+    });
+
+    const calls = fetchMock.mock.calls as unknown as [string, RequestInit][];
+    expect((calls[0][1].body as FormData).get("temporary")).toBe("true");
+    const body = JSON.parse(calls[2][1].body as string);
+    expect(body.published).toBe(false);
+    expect(body.scheduled_publish_time).toBe("1800000000");
+  });
+
+  test("a video in the list is refused before anything uploads", async () => {
+    const fetchMock = photoThenFeed();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(
+      uploadPhotoPost(createClient(), [tempFile("a.jpg"), tempFile("clip.mp4")], {}),
+    ).rejects.toThrow(/can only hold photos/);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+
+  test("a missing file anywhere in the list is refused before anything uploads", async () => {
+    const fetchMock = photoThenFeed();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(
+      uploadPhotoPost(createClient(), [tempFile("a.jpg"), "/nonexistent/b.jpg"], {}),
+    ).rejects.toThrow(/Cannot read media file/);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+  });
+
+  test("fewer than 2 or more than 10 photos is refused", async () => {
+    await expect(uploadPhotoPost(createClient(), [tempFile("a.jpg")], {})).rejects.toThrow(/2 to 10 photos/);
+    const eleven = Array.from({ length: 11 }, (_, i) => tempFile(`p${i}.jpg`));
+    await expect(uploadPhotoPost(createClient(), eleven, {})).rejects.toThrow(/2 to 10 photos/);
+  });
+
+  test("a failed upload says how far it got and posts nothing", async () => {
+    let n = 0;
+    const fetchMock = mock(async () =>
+      ++n === 2
+        ? new Response(JSON.stringify({ error: { message: "bad image", code: 324 } }))
+        : new Response(JSON.stringify({ id: `p${n}` })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await expect(
+      uploadPhotoPost(createClient(), [tempFile("a.jpg"), tempFile("b.jpg"), tempFile("c.jpg")], {}),
+    ).rejects.toThrow(/b\.jpg failed after 1 of 3 photos; nothing was posted/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -2,17 +2,19 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { FacebookClient } from "../client.js";
 import { wrapToolHandler } from "../utils/error-handler.js";
-import { uploadMedia } from "../utils/media.js";
+import { MAX_PHOTOS_PER_POST, uploadMedia, uploadPhotoPost } from "../utils/media.js";
 
-// 10 minutes minimum, 6 months maximum scheduling window
+// 10 minutes minimum, 30 days maximum. Facebook rejects anything later with a bare
+// "(#100) The specified scheduled publish time is invalid" (measured 2026-10-03:
+// 29 days accepted, 31 refused).
 const MIN_SCHEDULE_MS = 10 * 60 * 1000;
-const MAX_SCHEDULE_MS = 6 * 30 * 24 * 60 * 60 * 1000;
+const MAX_SCHEDULE_MS = 30 * 24 * 60 * 60 * 1000;
 
 // POST /{page-id}/feed — schedule a future post with published=false
 const register = (server: McpServer, client: FacebookClient) => {
   server.tool(
     "facebook_schedule_post",
-    "Schedule a Facebook Page post for a future time. The scheduled_time must be between 10 minutes and 6 months from now (ISO 8601 format). Can include a link, or a local photo or video file (media_path).",
+    "Schedule a Facebook Page post for a future time. The scheduled_time must be between 10 minutes and 30 days from now (ISO 8601 format). Can include a link, a local photo or video file (media_path), or several local photos in one post (media_paths).",
     {
       message: z
         .string()
@@ -21,7 +23,7 @@ const register = (server: McpServer, client: FacebookClient) => {
       scheduled_time: z
         .string()
         .describe(
-          "ISO 8601 datetime string for when to publish (e.g. 2026-04-01T14:00:00Z). Must be 10 min to 6 months from now.",
+          "ISO 8601 datetime string for when to publish (e.g. 2026-04-01T14:00:00Z). Must be 10 min to 30 days from now.",
         ),
       link: z
         .string()
@@ -33,6 +35,14 @@ const register = (server: McpServer, client: FacebookClient) => {
         .optional()
         .describe(
           "Optional local photo or video file to upload with the post, e.g. /workspace/group/photo.jpg. Photos: jpg png gif webp. Videos: mp4 mov webm. Can't be combined with link.",
+        ),
+      media_paths: z
+        .array(z.string())
+        .min(1)
+        .max(MAX_PHOTOS_PER_POST)
+        .optional()
+        .describe(
+          `Optional list of local photo files to post together in one post (2 to ${MAX_PHOTOS_PER_POST}), e.g. ["/workspace/agent/a.jpg", "/workspace/agent/b.jpg"]. Photos only. Use instead of media_path, not with it. Each photo counts toward the hourly write limit.`,
         ),
     },
     async (args) =>
@@ -54,7 +64,7 @@ const register = (server: McpServer, client: FacebookClient) => {
         }
         if (diff > MAX_SCHEDULE_MS) {
           throw new Error(
-            "scheduled_time must be no more than 6 months in the future.",
+            "scheduled_time must be no more than 30 days in the future (Facebook's limit).",
           );
         }
 
@@ -63,16 +73,21 @@ const register = (server: McpServer, client: FacebookClient) => {
           scheduledDate.getTime() / 1000,
         ).toString();
 
-        if (args.media_path) {
+        const paths = args.media_paths ?? (args.media_path ? [args.media_path] : []);
+        if (args.media_path && args.media_paths) {
+          throw new Error("Use media_path or media_paths, not both.");
+        }
+        if (paths.length > 0) {
           if (args.link) {
             throw new Error(
-              "media_path can't be combined with link. Put the link in the message text instead.",
+              "media_path/media_paths can't be combined with link. Put the link in the message text instead.",
             );
           }
-          const result = await uploadMedia(client, args.media_path, {
-            message: args.message,
-            scheduledPublishTime,
-          });
+          const options = { message: args.message, scheduledPublishTime };
+          const result =
+            paths.length === 1
+              ? await uploadMedia(client, paths[0], options)
+              : await uploadPhotoPost(client, paths, options);
           return {
             content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           };

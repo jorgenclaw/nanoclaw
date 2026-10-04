@@ -9,7 +9,8 @@ Gives an agent group `facebook_create_post`, `facebook_schedule_post`,
 `facebook_edit_post`, `facebook_delete_post`, `facebook_get_posts`, `facebook_get_comments`,
 `facebook_reply_comment`, `facebook_hide_comment`, and `facebook_get_insights`
 tools for one or more Facebook Business Pages, via the Graph API. Posts can
-carry a link, a public image URL, or a local photo or video file (`media_path`).
+carry a link, a public image URL, a local photo or video file (`media_path`),
+or 2–10 local photos in one post (`media_paths`).
 
 **This is the posting/polling half only.** It does not receive live
 webhook push events (new comments, Messenger DMs) — comments are read by

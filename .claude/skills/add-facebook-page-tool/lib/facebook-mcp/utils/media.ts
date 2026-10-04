@@ -54,11 +54,8 @@ interface UploadOptions {
   scheduledPublishTime?: string;
 }
 
-const uploadMedia = async (
-  client: FacebookClient,
-  path: string,
-  { message, scheduledPublishTime }: UploadOptions,
-) => {
+// Type + existence + size check, before anything is sent.
+const checkMediaFile = (path: string): { kind: MediaKind; type: string } => {
   const { kind, type } = detectMedia(path);
   let size: number;
   try {
@@ -72,6 +69,15 @@ const uploadMedia = async (
       `${kind === "photo" ? "Photo" : "Video"} is ${(size / 1024 / 1024).toFixed(1)} MB; Facebook's limit is ${max / 1024 / 1024} MB.`,
     );
   }
+  return { kind, type };
+};
+
+const uploadMedia = async (
+  client: FacebookClient,
+  path: string,
+  { message, scheduledPublishTime }: UploadOptions,
+) => {
+  const { kind, type } = checkMediaFile(path);
 
   const form = new FormData();
   form.append("source", new Blob([readFileSync(path)], { type }), basename(path));
@@ -89,4 +95,62 @@ const uploadMedia = async (
   });
 };
 
-export { detectMedia, uploadMedia };
+// NanoClaw patch: several photos in one post. The Graph API has no single
+// multi-file upload, so each photo goes to /{page-id}/photos unpublished, then
+// one /{page-id}/feed post attaches them all via attached_media. A scheduled
+// post needs its photos uploaded with temporary=true. Videos can't be attached
+// this way, so multi-file posts are photos only.
+const MAX_PHOTOS_PER_POST = 10;
+
+const uploadPhotoPost = async (
+  client: FacebookClient,
+  paths: string[],
+  { message, scheduledPublishTime }: UploadOptions,
+) => {
+  if (paths.length < 2 || paths.length > MAX_PHOTOS_PER_POST) {
+    throw new Error(`A multi-photo post takes 2 to ${MAX_PHOTOS_PER_POST} photos; got ${paths.length}.`);
+  }
+  // Check every file first so a bad path doesn't leave half the photos uploaded.
+  const files = paths.map((path) => {
+    const { kind, type } = checkMediaFile(path);
+    if (kind !== "photo") {
+      throw new Error(
+        `${basename(path)} is a video. A post with several files can only hold photos; post the video on its own.`,
+      );
+    }
+    return { path, type };
+  });
+
+  const { pageId } = client.config;
+  const photoIds: string[] = [];
+  for (const { path, type } of files) {
+    const form = new FormData();
+    form.append("source", new Blob([readFileSync(path)], { type }), basename(path));
+    form.append("published", "false");
+    if (scheduledPublishTime) form.append("temporary", "true");
+    try {
+      const { id } = (await client.request(`/${pageId}/photos`, { method: "POST", body: form })) as { id: string };
+      photoIds.push(id);
+    } catch (e) {
+      throw new Error(
+        `Uploading ${basename(path)} failed after ${photoIds.length} of ${files.length} photos; nothing was posted. ${(e as Error).message}`,
+      );
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    attached_media: photoIds.map((id) => ({ media_fbid: id })),
+  };
+  if (message) body.message = message;
+  if (scheduledPublishTime) {
+    body.published = false;
+    body.scheduled_publish_time = scheduledPublishTime;
+  }
+  const result = await client.request(`/${pageId}/feed`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return { ...(result as object), photo_ids: photoIds };
+};
+
+export { detectMedia, MAX_PHOTOS_PER_POST, uploadMedia, uploadPhotoPost };
