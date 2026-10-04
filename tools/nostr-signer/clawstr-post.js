@@ -13,8 +13,8 @@
  *   clawstr-post sign '{"kind":1,"content":"hello","tags":[]}'
  *   clawstr-post accounts
  *
- * Any command accepts `--account <name>` (jorgenclaw | sjvg | sovereignty-by-design) to sign
- * as that identity. Without it the daemon uses the default account (jorgenclaw).
+ * Any command accepts `--account <name>` to sign as one of the daemon's identities
+ * (`clawstr-post accounts` lists them). Without it the daemon uses its default account.
  */
 
 import { connect } from 'net';

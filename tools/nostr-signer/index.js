@@ -40,19 +40,47 @@ function logAlert(msg) {
 }
 
 // --- Load keys from kernel keyring ---
-// The default account (Jorgenclaw) uses the keyring key named `nsec` and is required.
-// Extra accounts are optional: each is a user key named `nostr:<account>` and is skipped
-// with a warning if absent. Only get_public_key and sign_event accept an `account` param;
-// DM and encryption methods always use the default key.
-const DEFAULT_ACCOUNT = 'jorgenclaw';
-const EXTRA_ACCOUNTS = ['sjvg', 'sovereignty-by-design'];
+// The default account uses the keyring key named `nsec` and is required. Its name comes from
+// NOSTR_SIGNER_DEFAULT_ACCOUNT (falls back to "default"; "default" always works as an alias).
+// Extra accounts are discovered automatically: every user key named `nostr:<account>` in the
+// user keyring is loaded. Add one with add-account-key.sh, then restart the daemon.
+// Only get_public_key and sign_event accept an `account` param; DM and encryption methods
+// always use the default key.
+const DEFAULT_ACCOUNT = process.env.NOSTR_SIGNER_DEFAULT_ACCOUNT || 'default';
+const ACCOUNT_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
-function loadKey(description) {
-  const keyId = execSync(`keyctl search @u user ${description}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+function loadKeyById(keyId) {
   const nsec = execSync(`keyctl print ${keyId}`, { encoding: 'utf8' }).trim();
   const decoded = decodeNsec(nsec);
   if (decoded.type !== 'nsec') throw new Error('Keyring value is not an nsec');
   return decoded.data;
+}
+
+function loadKey(description) {
+  const keyId = execSync(`keyctl search @u user ${description}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  return loadKeyById(keyId);
+}
+
+/** Account names of all `nostr:<name>` user keys in the user keyring, mapped to key IDs. */
+function discoverExtraAccounts() {
+  const found = new Map();
+  let ids = [];
+  try {
+    ids = execSync('keyctl rlist @u', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split(/\s+/).filter(Boolean);
+  } catch { /* empty keyring */ }
+  for (const id of ids) {
+    let desc;
+    try {
+      desc = execSync(`keyctl rdescribe ${id}`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch { continue; }
+    // Format: type;uid;gid;perm;description
+    const [type, , , , ...rest] = desc.split(';');
+    const description = rest.join(';');
+    if (type !== 'user' || !description.startsWith('nostr:')) continue;
+    const name = description.slice('nostr:'.length);
+    if (ACCOUNT_NAME_RE.test(name) && name !== DEFAULT_ACCOUNT && name !== 'default') found.set(name, id);
+  }
+  return found;
 }
 
 const accounts = new Map(); // account name -> { secretKeyHex, pubkey }
@@ -67,13 +95,13 @@ try {
   process.exit(1);
 }
 
-for (const name of EXTRA_ACCOUNTS) {
+for (const [name, keyId] of discoverExtraAccounts()) {
   try {
-    const sk = loadKey(`nostr:${name}`);
+    const sk = loadKeyById(keyId);
     accounts.set(name, { secretKeyHex: sk, pubkey: getPublicKey(sk) });
   } catch {
     // Same rule: never log err.message
-    console.warn(`[nostr-signer] Account "${name}" not loaded (no valid nostr:${name} key in keyring)`);
+    console.warn(`[nostr-signer] Account "${name}" not loaded (nostr:${name} is not a valid nsec)`);
   }
 }
 
@@ -84,7 +112,8 @@ for (const [name, acct] of accounts) {
 
 /** Resolve the `account` request param; returns null for an unknown/unloaded account. */
 function resolveAccount(p) {
-  return accounts.get(p.account || DEFAULT_ACCOUNT) || null;
+  const name = !p.account || p.account === 'default' ? DEFAULT_ACCOUNT : p.account;
+  return accounts.get(name) || null;
 }
 
 function unknownAccountError(p) {
