@@ -28,15 +28,15 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { timestamp?: string },
+  opts?: { timestamp?: string; processAfter?: string },
 ) {
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, content)
-       VALUES (?, ?, ?, 'pending', ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, content)
+       VALUES (?, ?, ?, 'pending', ?, ?)`,
     )
-    .run(id, kind, timestamp, JSON.stringify(content));
+    .run(id, kind, timestamp, opts?.processAfter ?? null, JSON.stringify(content));
 }
 
 describe('context timezone header', () => {
@@ -146,6 +146,19 @@ describe('task timestamps', () => {
     insertMessage('t1', 'task', { prompt: 'do the thing' }, { timestamp: '2026-01-05T12:00:00.000Z' });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain(`time="${formatLocalTime('2026-01-05T12:00:00.000Z', TIMEZONE)}"`);
+  });
+
+  it('uses the due time, not the insert time, for a pre-queued recurring run', () => {
+    // Next daily run is inserted when the previous one finishes (Jan 4), due Jan 5.
+    insertMessage(
+      't1',
+      'task',
+      { prompt: 'daily briefing' },
+      { timestamp: '2026-01-04T14:02:00.000Z', processAfter: '2026-01-05T14:00:00.000Z' },
+    );
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain(`time="${formatLocalTime('2026-01-05T14:00:00.000Z', TIMEZONE)}"`);
+    expect(result).not.toContain(formatLocalTime('2026-01-04T14:02:00.000Z', TIMEZONE));
   });
 });
 

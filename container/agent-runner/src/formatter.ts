@@ -203,7 +203,9 @@ function originAttr(msg: MessageInRow): string {
 function formatTaskMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const from = originAttr(msg);
-  const time = formatLocalTime(msg.timestamp, TIMEZONE);
+  // A recurring task's next row is inserted when the previous run completes,
+  // so `timestamp` is ~one period stale. The fire time is `process_after`.
+  const time = formatLocalTime(msg.process_after || msg.timestamp, TIMEZONE);
   const parts: string[] = [];
   if (content.scriptOutput) {
     parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
