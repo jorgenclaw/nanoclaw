@@ -153,4 +153,17 @@ const uploadPhotoPost = async (
   return { ...(result as object), photo_ids: photoIds };
 };
 
-export { detectMedia, MAX_PHOTOS_PER_POST, uploadMedia, uploadPhotoPost };
+// NanoClaw patch: upload one photo without posting it, for use as the Page's
+// cover or profile picture. Returns the photo ID.
+const uploadUnpublishedPhoto = async (client: FacebookClient, path: string): Promise<string> => {
+  const { kind, type } = checkMediaFile(path);
+  if (kind !== "photo") throw new Error(`${basename(path)} is a video; this needs a photo.`);
+  const form = new FormData();
+  form.append("source", new Blob([readFileSync(path)], { type }), basename(path));
+  form.append("published", "false");
+  const { pageId } = client.config;
+  const { id } = (await client.request(`/${pageId}/photos`, { method: "POST", body: form })) as { id: string };
+  return id;
+};
+
+export { detectMedia, MAX_PHOTOS_PER_POST, uploadMedia, uploadPhotoPost, uploadUnpublishedPhoto };

@@ -7,8 +7,12 @@ description: Add Facebook Page posting, scheduling, comment reading/replying, an
 
 Gives an agent group `facebook_create_post`, `facebook_schedule_post`,
 `facebook_edit_post`, `facebook_delete_post`, `facebook_get_posts`, `facebook_get_comments`,
-`facebook_reply_comment`, `facebook_hide_comment`, and `facebook_get_insights`
-tools for one or more Facebook Business Pages, via the Graph API. Posts can
+`facebook_reply_comment`, `facebook_hide_comment`, `facebook_delete_comment`,
+`facebook_get_insights`, `facebook_get_page_info`, `facebook_update_page_info`,
+`facebook_set_cover_photo`, `facebook_set_profile_picture`,
+`facebook_get_recommendations`, `facebook_get_scheduled_posts`, and
+`facebook_get_mentions` tools for one or more Facebook Business Pages, via the
+Graph API. Posts can
 carry a link, a public image URL, a local photo or video file (`media_path`),
 or 2–10 local photos in one post (`media_paths`).
 

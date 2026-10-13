@@ -9,6 +9,10 @@ import { register as registerGetComments } from "./get-comments.js";
 import { register as registerReplyComment } from "./reply-comment.js";
 import { register as registerHideComment } from "./hide-comment.js";
 import { register as registerGetInsights } from "./get-insights.js";
+import { register as registerDeleteComment } from "./delete-comment.js";
+import { register as registerPageInfo } from "./page-info.js";
+import { register as registerPageImages } from "./page-images.js";
+import { register as registerPageActivity } from "./page-activity.js";
 
 // Register all Facebook Page management tools with the MCP server
 const registerAllTools = (server: McpServer, client: FacebookClient): void => {
@@ -21,6 +25,10 @@ const registerAllTools = (server: McpServer, client: FacebookClient): void => {
   registerReplyComment(server, client);
   registerHideComment(server, client);
   registerGetInsights(server, client);
+  registerDeleteComment(server, client);
+  registerPageInfo(server, client);
+  registerPageImages(server, client);
+  registerPageActivity(server, client);
 };
 
 export { registerAllTools };

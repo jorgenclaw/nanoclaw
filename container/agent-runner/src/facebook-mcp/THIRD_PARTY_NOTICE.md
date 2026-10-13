@@ -80,6 +80,18 @@ endpoints) need to be applied here by hand.
    or scheduled. `client.ts` leaves the Content-Type to fetch for a FormData
    body. Audio is rejected with an explanation: Facebook has no audio post.
 
+10. **`tools/page-info.ts`**, **`tools/page-images.ts`**,
+    **`tools/page-activity.ts`**, **`tools/delete-comment.ts`** (new, 2026-10-13)
+    + **`utils/media.ts`** (`uploadUnpublishedPhoto`) — Page upkeep:
+    `facebook_get_page_info` / `facebook_update_page_info` (About,
+    description, website, phone, email, categories via `POST /{page-id}`,
+    needs `pages_manage_metadata`); `facebook_set_cover_photo` and
+    `facebook_set_profile_picture` (upload unpublished, then point the Page at
+    the photo ID); `facebook_get_recommendations` (`/ratings`),
+    `facebook_get_scheduled_posts`, `facebook_get_mentions` (`/tagged`);
+    `facebook_delete_comment`. **`tools/get-posts.ts`** also returns each
+    post's link and comment/reaction/share counts.
+
 ## Not possible through the Graph API (checked 2026-09-24)
 
 - **Pinning a post.** v25 has no `is_pinned` field; `POST /{post-id}` with
@@ -87,3 +99,5 @@ endpoints) need to be applied here by hand.
 - Who-can-comment settings, turning off post notifications, partnership-ad
   codes and turning off translations are facebook.com menu items with no
   Graph API equivalent.
+- **Reading or answering Messenger conversations.** `/{page-id}/conversations`
+  needs `pages_messaging`, which needs Meta App Review (checked 2026-10-13).
