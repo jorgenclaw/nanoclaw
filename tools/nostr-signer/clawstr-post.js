@@ -6,7 +6,8 @@
  * instead of reading a hex key file. The private key never enters the container.
  *
  * Usage:
- *   clawstr-post post <subclaw> "content"
+ *   clawstr-post note "content" [--image photo.jpg ...] [--dry-run]
+ *   clawstr-post post <subclaw> "content" [--image photo.jpg ...]
  *   clawstr-post reply <event-id> "content"
  *   clawstr-post upvote <event-id>
  *   clawstr-post pubkey
@@ -18,10 +19,17 @@
  * (`clawstr-post accounts` lists them). Without it the daemon uses its default account.
  * `profile` is the exception: it refuses to run without `--account`, so a missing flag
  * can never overwrite the default identity's profile.
+ *
+ * `note` is a regular Nostr post (kind 1), the kind followers see in Primal, Damus and other
+ * apps. `post` is a Clawstr subclaw post (kind 1111), which those apps don't show in feeds.
+ * `--image <file>` (repeatable) uploads each file to Blossom as the same account and attaches
+ * it (URL in the text plus a NIP-92 imeta tag). If any upload fails, nothing is posted.
  */
 
 import { connect } from 'net';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
+import { createHash } from 'crypto';
+import { basename, extname } from 'path';
 import WebSocket from 'ws';
 
 const SOCKET_PATH = process.env.NOSTR_SIGNER_SOCKET || '/run/nostr/signer.sock';
@@ -47,6 +55,7 @@ function daemonRequest(payload) {
 }
 
 let account; // set from --account in main
+const mediaPaths = []; // set from --image in main
 
 async function signEvent(kind, content, tags) {
   const res = await daemonRequest({
@@ -67,6 +76,70 @@ async function listAccounts() {
   const res = await daemonRequest({ method: 'list_accounts' });
   if (res.error) throw new Error(res.error);
   return res.accounts;
+}
+
+// --- Images and video (Blossom) ---
+// Kept in this file on purpose: agent containers mount clawstr-post as a single file
+// (/usr/local/bin/clawstr-post), so it can't import blossom-upload.js from beside it.
+// Uploads are signed by the same --account as the post, so the blob belongs to that identity.
+
+const BLOSSOM_SERVER = process.env.BLOSSOM_SERVER || 'https://blossom.jorgenclaw.ai';
+const MAX_MEDIA_BYTES = 100 * 1024 * 1024; // Cloudflare's proxy limit in front of Blossom
+const MEDIA_TYPES = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
+};
+
+function checkMedia(path) {
+  const mime = MEDIA_TYPES[extname(path).toLowerCase()];
+  if (!mime) throw new Error(`${basename(path)}: unsupported type. Use ${Object.keys(MEDIA_TYPES).join(' ')}`);
+  let size;
+  try { size = statSync(path).size; } catch { throw new Error(`Cannot read ${path} (does it exist here?)`); }
+  if (size > MAX_MEDIA_BYTES) throw new Error(`${basename(path)} is ${(size / 1048576).toFixed(1)} MB; the limit is 100 MB`);
+  return { mime, size };
+}
+
+async function uploadMedia(path) {
+  const { mime, size } = checkMedia(path);
+  const bytes = readFileSync(path);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const auth = await signEvent(24242, `Upload ${basename(path)}`, [
+    ['t', 'upload'], ['x', sha256], ['expiration', String(Math.floor(Date.now() / 1000) + 300)],
+  ]);
+  const res = await fetch(`${BLOSSOM_SERVER}/upload`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Nostr ${Buffer.from(JSON.stringify(auth)).toString('base64')}`,
+      'Content-Type': mime,
+      'Content-Length': String(size),
+    },
+    body: bytes,
+  });
+  if (!res.ok) {
+    const why = (await res.text()).slice(0, 200);
+    throw new Error(`Blossom refused ${basename(path)} (${res.status}): ${why}` +
+      (res.status === 401 || res.status === 403 ? ' — is this account on the Blossom server\'s upload list?' : ''));
+  }
+  const blob = await res.json();
+  return { url: blob.url || `${BLOSSOM_SERVER}/${sha256}`, sha256, mime, size };
+}
+
+// Uploads every file, then adds each URL to the text and an `imeta` tag (NIP-92) so clients
+// show the picture. Files are checked before anything uploads, and any failure stops the
+// command, so a post never goes out with its pictures silently missing.
+async function withMedia(content, tags, paths) {
+  if (paths.length === 0) return { content, tags };
+  paths.forEach(checkMedia);
+  const media = [];
+  for (const p of paths) {
+    const m = await uploadMedia(p);
+    console.error(`Uploaded ${basename(p)} -> ${m.url}`);
+    media.push(m);
+  }
+  return {
+    content: `${content}\n\n${media.map((m) => m.url).join('\n')}`,
+    tags: [...tags, ...media.map((m) => ['imeta', `url ${m.url}`, `m ${m.mime}`, `x ${m.sha256}`, `size ${m.size}`])],
+  };
 }
 
 // --- Relay publishing (lightweight, no dependencies) ---
@@ -144,17 +217,45 @@ async function cmdPost(subclaw, content) {
   }
   let name = subclaw.replace(/^(https:\/\/clawstr\.com)?\/c\//, '').replace(/^\/+/, '');
   const subclawUrl = `https://clawstr.com/c/${name}`;
-  const tags = [
+  const base = [
     ['I', subclawUrl], ['K', 'web'],
     ['i', subclawUrl], ['k', 'web'],
     ['L', 'agent'], ['l', 'ai', 'agent'],
     ['client', 'clawstr-cli'],
   ];
-  const event = await signEvent(1111, content, tags);
+  const { content: body, tags } = await withMedia(content, base, mediaPaths);
+  const event = await signEvent(1111, body, tags);
   const relays = await publishToRelays(event);
   if (relays.length > 0) {
     console.log(`${subclawUrl}/post/${event.id}`);
     console.error(`Posted to ${relays.length} relay(s)`);
+  } else {
+    console.error('Failed to publish to any relay');
+    process.exit(1);
+  }
+}
+
+// A regular Nostr note (kind 1): what followers see in Primal, Damus, Amethyst and other
+// clients. Clawstr posts (kind 1111) don't show in those home feeds, so business accounts
+// should use this. --dry-run checks the files and prints the note without uploading or posting.
+async function cmdNote(content, dryRun) {
+  if (!content) {
+    console.error('Usage: clawstr-post note "content" [--image photo.jpg ...] [--account <name>] [--dry-run]');
+    process.exit(1);
+  }
+  if (dryRun) {
+    mediaPaths.forEach(checkMedia);
+    console.error(`Account: ${account || '(default)'}  pubkey: ${await getPubkey()}`);
+    console.log(content + mediaPaths.map((p) => `\n[image: ${basename(p)}]`).join(''));
+    console.error(`Dry run: ${mediaPaths.length} file(s) checked, nothing uploaded or posted`);
+    return;
+  }
+  const { content: body, tags } = await withMedia(content, [], mediaPaths);
+  const event = await signEvent(1, body, tags);
+  const relays = await publishToRelays(event);
+  if (relays.length > 0) {
+    console.log(event.id);
+    console.error(`Note published to ${relays.length} relay(s): ${relays.join(', ')}`);
   } else {
     console.error('Failed to publish to any relay');
     process.exit(1);
@@ -273,6 +374,15 @@ if (accountIdx !== -1) {
   }
   argv.splice(accountIdx, 2);
 }
+// --image <file>, repeatable, in any position.
+for (let i = argv.indexOf('--image'); i !== -1; i = argv.indexOf('--image')) {
+  if (!argv[i + 1]) {
+    console.error('Usage: --image <file>');
+    process.exit(1);
+  }
+  mediaPaths.push(argv[i + 1]);
+  argv.splice(i, 2);
+}
 const dryRunIdx = argv.indexOf('--dry-run');
 const dryRun = dryRunIdx !== -1;
 if (dryRun) argv.splice(dryRunIdx, 1);
@@ -281,6 +391,7 @@ const [cmd, ...args] = argv;
 try {
   switch (cmd) {
     case 'post':    await cmdPost(args[0], args.slice(1).join(' ')); break;
+    case 'note':    await cmdNote(args.join(' '), dryRun); break;
     case 'reply':   await cmdReply(args[0], args[1], args.slice(2).join(' ')); break;
     case 'upvote':  await cmdUpvote(args[0], args[1]); break;
     case 'pubkey':  console.log(await getPubkey()); break;
@@ -290,8 +401,9 @@ try {
       for (const a of await listAccounts()) console.log(`${a.name}${a.default ? ' (default)' : ''} ${a.pubkey}`);
       break;
     default:
-      console.error('Commands: post, reply, upvote, pubkey, sign, accounts, profile  (all accept --account <name>)');
-      console.error('Example: clawstr-post post ai-freedom "Hello from the daemon!"');
+      console.error('Commands: note, post, reply, upvote, pubkey, sign, accounts, profile  (all accept --account <name>)');
+      console.error('note and post accept --image <file> (repeat it for several photos or a video)');
+      console.error('Example: clawstr-post note --account sjvg --image basil.jpg "Fresh basil today"');
       process.exit(1);
   }
 } catch (e) {
