@@ -23,7 +23,10 @@ const register = (server: McpServer, client: FacebookClient) => {
       scheduled_time: z
         .string()
         .describe(
-          "ISO 8601 datetime string for when to publish (e.g. 2026-04-01T14:00:00Z). Must be 10 min to 30 days from now.",
+          // NanoClaw patch: the example used to be a UTC time ("...Z"), and an agent
+          // copied that shape for a local time, so a 10 AM post went out at 3 AM
+          // Pacific. Show a local time with its offset instead.
+          "When to publish, as an ISO 8601 datetime WITH the local UTC offset, e.g. 2026-11-10T10:00:00-08:00 for 10 AM Pacific in winter (-07:00 in summer). A time ending in Z is UTC, not local time. Must be 10 min to 30 days from now.",
         ),
       link: z
         .string()
